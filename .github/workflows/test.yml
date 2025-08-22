@@ -1,0 +1,14 @@
+name: Test Encryptor
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Test installation
+      run: |
+        chmod +x install.sh encryptor.sh
+        ./install.sh
+        which encryptor
