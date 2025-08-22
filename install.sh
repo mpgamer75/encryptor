@@ -19,7 +19,7 @@ RESET="\e[0m"
 VERSION="1.0.0"
 SCRIPT_NAME="encryptor.sh"
 BINARY_NAME="encryptor"
-GITHUB_URL="https://raw.githubusercontent.com/yourusername/encryptor/main"
+GITHUB_URL="https://raw.githubusercontent.com/mpgamer75/encryptor/main"
 
 # Functions
 print_header() {
