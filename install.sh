@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Encryptor Installation Script
-# Installs Encryptor system-wide or locally
+# Installs Encryptor system-wide or locally with automatic PATH configuration
 
 set -e
 
@@ -68,6 +68,48 @@ check_requirements() {
     echo
 }
 
+detect_shell() {
+    local user_shell=$(basename "${SHELL:-}")
+    local detected_shell=""
+    local config_file=""
+    
+    echo -e "${BLUE}🐚 Detecting shell configuration...${RESET}"
+    
+    # Detect shell and corresponding config file
+    case "$user_shell" in
+        "zsh")
+            detected_shell="Zsh"
+            config_file="$HOME/.zshrc"
+            ;;
+        "bash")
+            detected_shell="Bash"
+            if [[ -f "$HOME/.bashrc" ]]; then
+                config_file="$HOME/.bashrc"
+            elif [[ -f "$HOME/.bash_profile" ]]; then
+                config_file="$HOME/.bash_profile"
+            else
+                config_file="$HOME/.bashrc"
+            fi
+            ;;
+        "fish")
+            detected_shell="Fish"
+            config_file="$HOME/.config/fish/config.fish"
+            ;;
+        *)
+            detected_shell="Unknown ($user_shell)"
+            config_file="$HOME/.profile"
+            ;;
+    esac
+    
+    echo -e "${GREEN}✅ Shell: ${BOLD}$detected_shell${RESET}"
+    echo -e "${BLUE}📝 Config file: ${BOLD}$config_file${RESET}"
+    echo
+    
+    # Return values via global variables
+    DETECTED_SHELL="$user_shell"
+    CONFIG_FILE="$config_file"
+}
+
 download_script() {
     echo -e "${BLUE}📥 Downloading Encryptor...${RESET}"
     
@@ -86,10 +128,10 @@ download_script() {
         exit 1
     fi
     
-    if [[ $? -eq 0 ]]; then
+    if [[ $? -eq 0 ]] && [[ -s "$SCRIPT_NAME" ]]; then
         echo -e "${GREEN}✅ Download completed${RESET}"
     else
-        echo -e "${RED}❌ Download failed${RESET}"
+        echo -e "${RED}❌ Download failed or file is empty${RESET}"
         exit 1
     fi
     echo
@@ -97,7 +139,7 @@ download_script() {
 
 install_encryptor() {
     local install_dir
-    local needs_sudo=false
+    local needs_path_config=false
     
     # Determine installation directory
     if [[ $EUID -eq 0 ]]; then
@@ -111,6 +153,7 @@ install_encryptor() {
         else
             # Fall back to user directory
             install_dir="$HOME/.local/bin"
+            needs_path_config=true
             echo -e "${GREEN}🔧 Installing for current user in $install_dir${RESET}"
             
             # Create user bin directory if it doesn't exist
@@ -132,35 +175,127 @@ install_encryptor() {
         exit 1
     fi
     
-    # Check PATH
-    if [[ ":$PATH:" != *":$install_dir:"* ]] && [[ "$install_dir" == "$HOME/.local/bin" ]]; then
-        echo -e "${YELLOW}⚠️  Warning: $install_dir is not in your PATH${RESET}"
-        echo -e "${YELLOW}Add this line to your shell configuration:${RESET}"
-        echo -e "${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}"
-        echo
-        echo -e "${YELLOW}Shell configuration files:${RESET}"
-        echo -e "  Bash: ~/.bashrc or ~/.bash_profile"
-        echo -e "  Zsh:  ~/.zshrc"
-        echo -e "  Fish: ~/.config/fish/config.fish"
-        echo
-        echo -e "${YELLOW}Then reload with: ${BOLD}source ~/.bashrc${RESET} (or your shell config)"
-        echo
+    # Configure PATH if needed
+    if [[ "$needs_path_config" == true ]]; then
+        configure_path "$install_dir"
     fi
+}
+
+configure_path() {
+    local install_dir="$1"
+    
+    echo -e "${BLUE}⚙️  Configuring PATH...${RESET}"
+    
+    # Check if PATH already configured
+    if [[ ":$PATH:" == *":$install_dir:"* ]]; then
+        echo -e "${GREEN}✅ PATH already configured correctly${RESET}"
+        return 0
+    fi
+    
+    # Create config file if it doesn't exist
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${YELLOW}📁 Creating config file: $CONFIG_FILE${RESET}"
+        
+        # Create directory for fish config if needed
+        if [[ "$DETECTED_SHELL" == "fish" ]]; then
+            mkdir -p "$(dirname "$CONFIG_FILE")"
+        fi
+        
+        touch "$CONFIG_FILE"
+    fi
+    
+    # Check if PATH export already exists
+    local path_exists=false
+    case "$DETECTED_SHELL" in
+        "fish")
+            if grep -q "set -gx PATH.*\.local/bin" "$CONFIG_FILE" 2>/dev/null; then
+                path_exists=true
+            fi
+            ;;
+        *)
+            if grep -q 'export PATH.*\.local/bin' "$CONFIG_FILE" 2>/dev/null; then
+                path_exists=true
+            fi
+            ;;
+    esac
+    
+    # Add PATH configuration if not exists
+    if [[ "$path_exists" == false ]]; then
+        echo "" >> "$CONFIG_FILE"
+        echo "# Added by Encryptor installer" >> "$CONFIG_FILE"
+        
+        case "$DETECTED_SHELL" in
+            "fish")
+                echo "set -gx PATH \$HOME/.local/bin \$PATH" >> "$CONFIG_FILE"
+                ;;
+            *)
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$CONFIG_FILE"
+                ;;
+        esac
+        
+        echo -e "${GREEN}✅ PATH configured in $CONFIG_FILE${RESET}"
+    else
+        echo -e "${YELLOW}⚠️  PATH already configured in $CONFIG_FILE${RESET}"
+    fi
+    
+    # Update current session PATH
+    export PATH="$install_dir:$PATH"
+    echo -e "${GREEN}✅ PATH updated for current session${RESET}"
 }
 
 test_installation() {
     echo -e "${BLUE}🧪 Testing installation...${RESET}"
     
+    # Test if command is available
     if command -v "$BINARY_NAME" >/dev/null 2>&1; then
         echo -e "${GREEN}✅ Command '$BINARY_NAME' is available${RESET}"
         
-        # Test if script runs without errors
-        if timeout 2s "$BINARY_NAME" --version >/dev/null 2>&1 || [[ $? -eq 124 ]]; then
+        # Test if script runs and shows version
+        local version_output
+        if version_output=$("$BINARY_NAME" --version 2>/dev/null); then
             echo -e "${GREEN}✅ Encryptor launches successfully${RESET}"
+            echo -e "${BLUE}   $version_output${RESET}"
+        else
+            echo -e "${YELLOW}⚠️  Command available but version check failed${RESET}"
         fi
     else
         echo -e "${YELLOW}⚠️  Command '$BINARY_NAME' not immediately available${RESET}"
-        echo -e "${YELLOW}You may need to reload your shell or restart your terminal${RESET}"
+        
+        # Try direct path
+        if [[ -f "$HOME/.local/bin/$BINARY_NAME" ]]; then
+            echo -e "${BLUE}🔄 Testing direct path...${RESET}"
+            if version_output=$("$HOME/.local/bin/$BINARY_NAME" --version 2>/dev/null); then
+                echo -e "${GREEN}✅ Direct path works: $version_output${RESET}"
+                echo -e "${YELLOW}💡 You may need to restart your terminal${RESET}"
+            fi
+        fi
+    fi
+}
+
+reload_shell_config() {
+    echo -e "${BLUE}🔄 Attempting to reload shell configuration...${RESET}"
+    
+    # Try to source the config file
+    if [[ -f "$CONFIG_FILE" ]]; then
+        case "$DETECTED_SHELL" in
+            "fish")
+                # Fish shell doesn't support sourcing in the same way
+                echo -e "${YELLOW}💡 Fish shell detected - config will be loaded on next shell start${RESET}"
+                ;;
+            *)
+                if source "$CONFIG_FILE" 2>/dev/null; then
+                    echo -e "${GREEN}✅ Shell configuration reloaded${RESET}"
+                    
+                    # Test again after reload
+                    if command -v "$BINARY_NAME" >/dev/null 2>&1; then
+                        echo -e "${GREEN}🎉 Command '$BINARY_NAME' is now available!${RESET}"
+                        "$BINARY_NAME" --version
+                    fi
+                else
+                    echo -e "${YELLOW}⚠️  Could not reload configuration automatically${RESET}"
+                fi
+                ;;
+        esac
     fi
 }
 
@@ -176,12 +311,39 @@ print_success() {
     echo -e "${GREEN}${BOLD}🎉 Installation Complete! 🎉${RESET}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo
-    echo -e "${GREEN}You can now use Encryptor by running:${RESET}"
-    echo -e "${BOLD}  encryptor${RESET}"
-    echo
-    echo -e "${BLUE}Quick start:${RESET}"
-    echo -e "  ${YELLOW}encryptor${RESET}          # Launch interactive menu"
-    echo -e "  ${YELLOW}encryptor --help${RESET}   # Show help information"
+    
+    # Test final availability
+    if command -v "$BINARY_NAME" >/dev/null 2>&1; then
+        echo -e "${GREEN}✅ Encryptor is ready to use!${RESET}"
+        echo -e "${BOLD}  encryptor${RESET}          # Launch interactive menu"
+        echo -e "${BOLD}  encryptor --help${RESET}   # Show help information"
+    else
+        echo -e "${YELLOW}⚠️  Manual step required:${RESET}"
+        echo -e "${BOLD}Restart your terminal${RESET} or run one of these commands:"
+        
+        case "$DETECTED_SHELL" in
+            "zsh")
+                echo -e "${BOLD}  exec zsh${RESET}              # Restart Zsh"
+                echo -e "${BOLD}  source ~/.zshrc${RESET}       # Reload config"
+                ;;
+            "bash")
+                echo -e "${BOLD}  exec bash${RESET}             # Restart Bash"
+                echo -e "${BOLD}  source ~/.bashrc${RESET}      # Reload config"
+                ;;
+            "fish")
+                echo -e "${BOLD}  exec fish${RESET}             # Restart Fish"
+                ;;
+            *)
+                echo -e "${BOLD}  exec \$SHELL${RESET}          # Restart shell"
+                echo -e "${BOLD}  source $CONFIG_FILE${RESET}"
+                ;;
+        esac
+        
+        echo
+        echo -e "${BLUE}Or use the full path temporarily:${RESET}"
+        echo -e "${BOLD}  ~/.local/bin/encryptor${RESET}"
+    fi
+    
     echo
     echo -e "${BLUE}Features:${RESET}"
     echo -e "  • Multiple encryption algorithms (AES-256, RSA, Hybrid)"
@@ -197,6 +359,7 @@ print_success() {
 main() {
     print_header
     check_requirements
+    detect_shell
     
     local downloaded=false
     if [[ ! -f "$SCRIPT_NAME" ]]; then
@@ -206,6 +369,7 @@ main() {
     
     install_encryptor
     test_installation
+    reload_shell_config
     
     if [[ "$downloaded" == true ]]; then
         cleanup "downloaded"
@@ -226,10 +390,13 @@ case "${1:-}" in
         echo
         echo "This script will:"
         echo "  1. Check system requirements (Bash, OpenSSL)"
-        echo "  2. Download Encryptor (if not present locally)"
-        echo "  3. Install to appropriate directory"
-        echo "  4. Set up PATH if needed"
-        echo "  5. Test the installation"
+        echo "  2. Detect your shell (Zsh, Bash, Fish, etc.)"
+        echo "  3. Download Encryptor (if not present locally)"
+        echo "  4. Install to appropriate directory"
+        echo "  5. Automatically configure PATH for your shell"
+        echo "  6. Test the installation"
+        echo
+        echo "Supported shells: Zsh, Bash, Fish, and others"
         exit 0
         ;;
     --version|-v)
