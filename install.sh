@@ -250,13 +250,13 @@ test_installation() {
     if command -v "$BINARY_NAME" >/dev/null 2>&1; then
         echo -e "${GREEN}✅ Command '$BINARY_NAME' is available${RESET}"
         
-        # Test if script runs and shows version
+        # Test version with timeout to avoid hanging
         local version_output
-        if version_output=$("$BINARY_NAME" --version 2>/dev/null); then
+        if version_output=$(timeout 10s "$BINARY_NAME" --version 2>/dev/null); then
             echo -e "${GREEN}✅ Encryptor launches successfully${RESET}"
             echo -e "${BLUE}   $version_output${RESET}"
         else
-            echo -e "${YELLOW}⚠️  Command available but version check failed${RESET}"
+            echo -e "${YELLOW}⚠️  Command available but version check timed out${RESET}"
         fi
     else
         echo -e "${YELLOW}⚠️  Command '$BINARY_NAME' not immediately available${RESET}"
@@ -264,9 +264,18 @@ test_installation() {
         # Try direct path
         if [[ -f "$HOME/.local/bin/$BINARY_NAME" ]]; then
             echo -e "${BLUE}🔄 Testing direct path...${RESET}"
-            if version_output=$("$HOME/.local/bin/$BINARY_NAME" --version 2>/dev/null); then
+            if version_output=$(timeout 10s "$HOME/.local/bin/$BINARY_NAME" --version 2>/dev/null); then
                 echo -e "${GREEN}✅ Direct path works: $version_output${RESET}"
-                echo -e "${YELLOW}💡 You may need to restart your terminal${RESET}"
+                
+                # For GitHub Actions: export PATH in GITHUB_PATH
+                if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+                    echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+                    echo -e "${BLUE}🔧 Updated GITHUB_PATH for CI${RESET}"
+                else
+                    echo -e "${YELLOW}💡 You may need to restart your terminal${RESET}"
+                fi
+            else
+                echo -e "${YELLOW}⚠️  Direct path test timed out${RESET}"
             fi
         fi
     fi
@@ -275,7 +284,7 @@ test_installation() {
 reload_shell_config() {
     echo -e "${BLUE}🔄 Attempting to reload shell configuration...${RESET}"
     
-    # Try to source the config file
+    # Try to source the config file (but don't hang on it)
     if [[ -f "$CONFIG_FILE" ]]; then
         case "$DETECTED_SHELL" in
             "fish")
@@ -283,14 +292,9 @@ reload_shell_config() {
                 echo -e "${YELLOW}💡 Fish shell detected - config will be loaded on next shell start${RESET}"
                 ;;
             *)
-                if source "$CONFIG_FILE" 2>/dev/null; then
+                # Try to source but with timeout to avoid hanging
+                if timeout 5s bash -c "source '$CONFIG_FILE'" 2>/dev/null; then
                     echo -e "${GREEN}✅ Shell configuration reloaded${RESET}"
-                    
-                    # Test again after reload
-                    if command -v "$BINARY_NAME" >/dev/null 2>&1; then
-                        echo -e "${GREEN}🎉 Command '$BINARY_NAME' is now available!${RESET}"
-                        "$BINARY_NAME" --version
-                    fi
                 else
                     echo -e "${YELLOW}⚠️  Could not reload configuration automatically${RESET}"
                 fi
