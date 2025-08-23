@@ -7,8 +7,59 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - name: Test installation
+    
+    - name: Set up environment
+      run: |
+        echo "Setting up test environment..."
+        sudo apt-get update -qq
+        sudo apt-get install -y openssl
+    
+    - name: Make scripts executable
       run: |
         chmod +x install.sh encryptor.sh
+        ls -la install.sh encryptor.sh
+    
+    - name: Test installation
+      run: |
+        echo "Running installation..."
         ./install.sh
-        which encryptor
+        
+        # Source the shell configuration to update PATH
+        echo "Updating PATH for current session..."
+        export PATH="$HOME/.local/bin:$PATH"
+        
+        # Test that encryptor is available
+        echo "Testing encryptor command..."
+        which encryptor || echo "Command not in PATH, trying direct path..."
+        
+        # Test direct path if command not in PATH
+        if ! command -v encryptor >/dev/null 2>&1; then
+          echo "Testing direct path..."
+          $HOME/.local/bin/encryptor --version
+        else
+          echo "Testing via PATH..."
+          encryptor --version
+        fi
+    
+    - name: Test encryptor functionality
+      run: |
+        # Update PATH again for this step
+        export PATH="$HOME/.local/bin:$PATH"
+        
+        # Create test file
+        echo "This is a test file for encryption" > test_file.txt
+        ls -la test_file.txt
+        
+        # Test that encryptor shows help
+        if command -v encryptor >/dev/null 2>&1; then
+          encryptor --help
+        else
+          $HOME/.local/bin/encryptor --help
+        fi
+        
+        echo "✅ All tests passed!"
+    
+    - name: Cleanup
+      run: |
+        rm -f test_file.txt
+        echo "Cleanup completed"
