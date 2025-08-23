@@ -3,7 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Bash](https://img.shields.io/badge/Language-Bash-green.svg)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-blue.svg)](#compatibility)
-[![Version](https://img.shields.io/badge/Version-1.0.0-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/Version-1.0.0-brightgreen.svg)](https://github.com/mpgamer75/encryptor/releases)
+[![Downloads](https://img.shields.io/github/downloads/mpgamer75/encryptor/total)](https://github.com/mpgamer75/encryptor/releases)
 
 **Encryptor** is a powerful, user-friendly command-line encryption tool that provides security for your files. Built with pure Bash and OpenSSL, it offers multiple encryption algorithms with an intuitive interface.
 
@@ -18,12 +19,65 @@
 - 📖 **Built-in Help**: Comprehensive manual with algorithm explanations
 - 🎯 **Cross-Platform**: Works on Linux, macOS, and WSL
 
+## 📦 **Installation**
+
+### Option 1: Debian/Ubuntu Package (.deb) - Recommended 🌟
+
+**Single command installation for Debian/Ubuntu systems:**
+
+```bash
+# Download and install
+wget https://github.com/mpgamer75/encryptor/releases/latest/download/encryptor_1.0.0-1_all.deb
+sudo dpkg -i encryptor_1.0.0-1_all.deb
+
+# Fix dependencies if needed
+sudo apt-get install -f
+```
+
+**Benefits:**
+
+- ✅ Native package management integration
+- ✅ Automatic dependency resolution
+- ✅ Easy updates with `apt upgrade`
+- ✅ Clean uninstallation with `apt remove encryptor`
+- ✅ Man page included (`man encryptor`)
+
+### Option 2: Universal Installation Script
+
+**Works on all Linux/macOS systems:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
+```
+
+### Option 3: Manual Installation
+
+**For advanced users or custom setups:**
+
+```bash
+git clone https://github.com/mpgamer75/encryptor.git
+cd encryptor
+chmod +x install.sh
+./install.sh
+```
+
+### Option 4: Direct Download
+
+**Minimal setup:**
+
+```bash
+wget https://raw.githubusercontent.com/mpgamer75/encryptor/main/encryptor.sh
+chmod +x encryptor.sh
+sudo mv encryptor.sh /usr/local/bin/encryptor
+```
+
 ## 🏗️ **Tech Stack**
 
 - **Language**: Bash 4.0+
 - **Cryptography**: OpenSSL
 - **Interface**: ANSI escape sequences for colors
 - **Platform**: POSIX-compliant systems
+- **Package Format**: Debian (.deb) for Linux distributions
 
 ## 🎯 **Project Mission**
 
@@ -37,31 +91,6 @@ In an era where data breaches and privacy violations are rampant, **Encryptor** 
 - **Zero learning curve** with guided workflows
 
 Whether you're a security professional, developer, or privacy-conscious individual, Encryptor empowers you to protect your sensitive data without compromise.
-
-## 📦 **Quick Installation**
-
-### Option 1: Automatic Installation (Recommended)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
-```
-
-### Option 2: Manual Installation
-
-```bash
-git clone https://github.com/mpgamer75/encryptor.git
-cd encryptor
-chmod +x install.sh
-./install.sh
-```
-
-### Option 3: Direct Download
-
-```bash
-wget https://raw.githubusercontent.com/mpgamer75/encryptor/main/encryptor.sh
-chmod +x encryptor.sh
-sudo mv encryptor.sh /usr/local/bin/encryptor
-```
 
 ## 🚀 **Quick Start**
 
@@ -134,13 +163,32 @@ encryptor
 
 ## 🧪 **Compatibility**
 
-| OS | Status | Notes |
-|----|--------|--------|
-| Ubuntu 18.04+ | ✅ Fully Supported | |
-| CentOS 7+ | ✅ Fully Supported | |
-| macOS 10.14+ | ✅ Fully Supported | |
-| Windows WSL | ✅ Fully Supported | |
-| Alpine Linux | ✅ Fully Supported | |
+| OS | Status | Installation Method |
+|----|--------|---------------------|
+| Ubuntu 18.04+ | ✅ Fully Supported | `.deb` package or script |
+| Debian 10+ | ✅ Fully Supported | `.deb` package or script |
+| CentOS 7+ | ✅ Fully Supported | Installation script |
+| macOS 10.14+ | ✅ Fully Supported | Installation script |
+| Windows WSL | ✅ Fully Supported | `.deb` package or script |
+| Alpine Linux | ✅ Fully Supported | Installation script |
+
+## 📦 **Package Management**
+
+**For Debian/Ubuntu users with .deb package:**
+
+```bash
+# Update Encryptor (when new version available)
+sudo apt update && sudo apt upgrade encryptor
+
+# Show package information
+apt show encryptor
+
+# View installed files
+dpkg -L encryptor
+
+# Completely remove Encryptor
+sudo apt remove encryptor
+```
 
 ## 📈 **Performance**
 
@@ -148,6 +196,7 @@ encryptor
 - **Memory Usage**: < 10MB during operation  
 - **Key Generation**: ~2 seconds for 2048-bit RSA
 - **Startup Time**: < 0.5 seconds
+- **Package Size**: ~15KB (.deb package)
 
 ## 🤝 **Contributing**
 
@@ -159,6 +208,19 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 git clone https://github.com/mpgamer75/encryptor.git
 cd encryptor
 ./encryptor.sh  # Test locally
+```
+
+### Building Debian Package
+
+```bash
+# Install build dependencies
+sudo apt install dpkg-dev debhelper fakeroot
+
+# Build package
+./build_deb.sh
+
+# Test package
+sudo dpkg -i encryptor_1.0.0-1_all.deb
 ```
 
 ### Running Tests
@@ -177,6 +239,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔮 **Roadmap**
 
+- [ ] APT Repository for easier installation (`sudo apt install encryptor`)
 - [ ] GUI version with Electron
 - [ ] Additional algorithms (ChaCha20, Blowfish)
 - [ ] Batch encryption for multiple files
@@ -184,16 +247,26 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [ ] Mobile companion app
 - [ ] Hardware security key support
 
+## 📚 **Documentation**
+
+- 📖 [Usage Guide](docs/USAGE.md) - Complete usage examples and best practices
+- 🔐 [Algorithm Guide](docs/ALGORITHMS.md) - Detailed security information and technical specs
+- 📋 Manual page: `man encryptor` (available after .deb installation)
+
 ## 🙏 **Acknowledgments**
 
 - **OpenSSL** team for robust cryptographic primitives
 - **Bash** community for scripting inspiration
 - **Security researchers** for algorithm recommendations
 
+## 📊 **Download Statistics**
+
+Check out our [releases page](https://github.com/mpgamer75/encryptor/releases) for the latest version and download statistics.
+
 <div align="center">
 
 **⭐ Star this repository if Encryptor helped secure your files! ⭐**
 
-[Report Bug](https://github.com/yourusername/encryptor/issues) • [Request Feature](https://github.com/yourusername/encryptor/issues) • [Documentation](docs/)
+[📥 Download Latest Release](https://github.com/mpgamer75/encryptor/releases/latest) • [🐛 Report Bug](https://github.com/mpgamer75/encryptor/issues) • [✨ Request Feature](https://github.com/mpgamer75/encryptor/issues) • [📖 Documentation](docs/)
 
 </div>
