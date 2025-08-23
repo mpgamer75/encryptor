@@ -1,0 +1,19 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure)
+        chmod 755 /usr/local/bin/encryptor
+        
+        if command -v mandb >/dev/null 2>&1; then
+            mandb -q /usr/share/man >/dev/null 2>&1 || true
+        fi
+        
+        echo ""
+        echo "🎉 Encryptor installed successfully!"
+        echo "Usage: encryptor --help"
+        echo "Launch: encryptor"
+        ;;
+esac
+
+exit 0

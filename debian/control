@@ -1,0 +1,23 @@
+Source: encryptor
+Section: utils
+Priority: optional
+Maintainer: Charles <your-email@example.com>
+Build-Depends: debhelper (>= 12), bash (>= 4.0)
+Standards-Version: 4.5.0
+Homepage: https://github.com/mpgamer75/encryptor
+
+Package: encryptor
+Architecture: all
+Depends: ${misc:Depends}, openssl (>= 1.1.0), bash (>= 4.0)
+Recommends: curl, wget
+Description: Advanced file encryption tool with multiple algorithms
+ Encryptor is a powerful, user-friendly command-line encryption tool that
+ provides security for your files. Built with pure Bash and OpenSSL, it
+ offers multiple encryption algorithms with an intuitive interface.
+ .
+ Features:
+  * Multiple encryption algorithms: AES-256, RSA, Hybrid AES+RSA, 3DES
+  * Beautiful CLI interface with colorful, intuitive menus
+  * Military-grade security with industry-standard encryption
+  * Cross-platform compatibility (Linux, macOS, WSL)
+  * Automatic key management and secure file handling
