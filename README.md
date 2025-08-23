@@ -1,3 +1,7 @@
+<div align="center">
+
+![Encryptor Logo](image/logo.png)
+
 # 🔐 Encryptor
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -6,7 +10,13 @@
 [![Version](https://img.shields.io/badge/Version-1.0.0-brightgreen.svg)](https://github.com/mpgamer75/encryptor/releases)
 [![Downloads](https://img.shields.io/github/downloads/mpgamer75/encryptor/total)](https://github.com/mpgamer75/encryptor/releases)
 
-**Encryptor** is a powerful, user-friendly command-line encryption tool that provides security for your files. Built with pure Bash and OpenSSL, it offers multiple encryption algorithms with an intuitive interface.
+**Advanced file encryption tool with multiple algorithms and intuitive interface**
+
+*Built with pure Bash and OpenSSL for maximum security and compatibility*
+
+---
+
+</div>
 
 ## 🚀 **Key Features**
 
@@ -21,12 +31,12 @@
 
 ## 📦 **Installation**
 
-### Option 1: Debian/Ubuntu Package (.deb) - Recommended 🌟
+### 🌟 Ubuntu/Debian Users (Recommended)
 
-**Single command installation for Debian/Ubuntu systems:**
+**Single command installation with native package management:**
 
 ```bash
-# Download and install
+# Download and install .deb package
 wget https://github.com/mpgamer75/encryptor/releases/latest/download/encryptor_1.0.0-1_all.deb
 sudo dpkg -i encryptor_1.0.0-1_all.deb
 
@@ -42,15 +52,15 @@ sudo apt-get install -f
 - ✅ Clean uninstallation with `apt remove encryptor`
 - ✅ Man page included (`man encryptor`)
 
-### Option 2: Universal Installation Script
+### 🔧 All Linux/macOS Systems
 
-**Works on all Linux/macOS systems:**
+**Universal installation script for any POSIX system:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
 ```
 
-### Option 3: Manual Installation
+### 📋 Manual Installation
 
 **For advanced users or custom setups:**
 
@@ -61,36 +71,15 @@ chmod +x install.sh
 ./install.sh
 ```
 
-### Option 4: Direct Download
+### ⚡ Direct Download
 
-**Minimal setup:**
+**Minimal setup for quick testing:**
 
 ```bash
 wget https://raw.githubusercontent.com/mpgamer75/encryptor/main/encryptor.sh
 chmod +x encryptor.sh
 sudo mv encryptor.sh /usr/local/bin/encryptor
 ```
-
-## 🏗️ **Tech Stack**
-
-- **Language**: Bash 4.0+
-- **Cryptography**: OpenSSL
-- **Interface**: ANSI escape sequences for colors
-- **Platform**: POSIX-compliant systems
-- **Package Format**: Debian (.deb) for Linux distributions
-
-## 🎯 **Project Mission**
-
-In an era where data breaches and privacy violations are rampant, **Encryptor** addresses the critical need for accessible, robust file encryption. Many users find existing encryption tools either too complex or lacking in security features.
-
-**Encryptor bridges this gap by providing**:
-
-- **Enterprise-level security** with a **consumer-friendly interface**
-- **Multiple encryption options** to match different security requirements
-- **Educational value** through built-in algorithm explanations
-- **Zero learning curve** with guided workflows
-
-Whether you're a security professional, developer, or privacy-conscious individual, Encryptor empowers you to protect your sensitive data without compromise.
 
 ## 🚀 **Quick Start**
 
@@ -122,6 +111,27 @@ encryptor
 - **Secure temporary files** with automatic cleanup
 - **Strong random key generation** for hybrid encryption
 - **No plaintext password storage**
+
+## 🏗️ **Tech Stack**
+
+- **Language**: Bash 4.0+
+- **Cryptography**: OpenSSL
+- **Interface**: ANSI escape sequences for colors
+- **Platform**: POSIX-compliant systems
+- **Package Format**: Debian (.deb) for Linux distributions
+
+## 🎯 **Project Mission**
+
+In an era where data breaches and privacy violations are rampant, **Encryptor** addresses the critical need for accessible, robust file encryption. Many users find existing encryption tools either too complex or lacking in security features.
+
+**Encryptor bridges this gap by providing**:
+
+- **Enterprise-level security** with a **consumer-friendly interface**
+- **Multiple encryption options** to match different security requirements
+- **Educational value** through built-in algorithm explanations
+- **Zero learning curve** with guided workflows
+
+Whether you're a security professional, developer, or privacy-conscious individual, Encryptor empowers you to protect your sensitive data without compromise.
 
 ## 📊 **Usage Examples**
 
@@ -265,8 +275,12 @@ Check out our [releases page](https://github.com/mpgamer75/encryptor/releases) f
 
 <div align="center">
 
+---
+
 **⭐ Star this repository if Encryptor helped secure your files! ⭐**
 
 [📥 Download Latest Release](https://github.com/mpgamer75/encryptor/releases/latest) • [🐛 Report Bug](https://github.com/mpgamer75/encryptor/issues) • [✨ Request Feature](https://github.com/mpgamer75/encryptor/issues) • [📖 Documentation](docs/)
+
+---
 
 </div>
