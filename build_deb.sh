@@ -25,8 +25,14 @@ cp docs/*.md debian/tmp/usr/share/doc/encryptor/ 2>/dev/null || true
 cp debian/encryptor.1 debian/tmp/usr/share/man/man1/
 gzip -9 debian/tmp/usr/share/man/man1/encryptor.1
 
-# Copy control files
+# Copy control file and add installed size
 cp debian/control debian/tmp/DEBIAN/
+
+# Calculate installed size in KB
+INSTALLED_SIZE=$(du -sk debian/tmp | cut -f1)
+echo "Installed-Size: $INSTALLED_SIZE" >> debian/tmp/DEBIAN/control
+
+# Copy maintainer scripts
 cp debian/postinst debian/tmp/DEBIAN/
 cp debian/prerm debian/tmp/DEBIAN/
 chmod 755 debian/tmp/DEBIAN/postinst debian/tmp/DEBIAN/prerm
@@ -39,6 +45,10 @@ echo "✅ Package built: encryptor_1.0.0-1_all.deb"
 # Test package
 echo "🧪 Testing package..."
 dpkg-deb --info encryptor_1.0.0-1_all.deb
+echo ""
+echo "📦 Package contents:"
 dpkg-deb --contents encryptor_1.0.0-1_all.deb
 
+echo ""
 echo "🎉 Build completed successfully!"
+echo "💡 Test with: sudo dpkg -i encryptor_1.0.0-1_all.deb"
