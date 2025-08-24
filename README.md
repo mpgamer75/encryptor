@@ -263,12 +263,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - 🔐 [Algorithm Guide](docs/ALGORITHMS.md) - Detailed security information and technical specs
 - 📋 Manual page: `man encryptor` (available after .deb installation)
 
-## 🙏 **Acknowledgments**
-
-- **OpenSSL** team for robust cryptographic primitives
-- **Bash** community for scripting inspiration
-- **Security researchers** for algorithm recommendations
-
 ## 📊 **Download Statistics**
 
 Check out our [releases page](https://github.com/mpgamer75/encryptor/releases) for the latest version and download statistics.
