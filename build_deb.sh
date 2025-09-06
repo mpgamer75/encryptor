@@ -38,17 +38,17 @@ cp debian/prerm debian/tmp/DEBIAN/
 chmod 755 debian/tmp/DEBIAN/postinst debian/tmp/DEBIAN/prerm
 
 # Build package
-fakeroot dpkg-deb --build debian/tmp encryptor_1.0.0-1_all.deb
+fakeroot dpkg-deb --build debian/tmp encryptor_1.1.0-1_all.deb
 
-echo "✅ Package built: encryptor_1.0.0-1_all.deb"
+echo "✅ Package built: encryptor_1.1.0-1_all.deb"
 
 # Test package
 echo "🧪 Testing package..."
-dpkg-deb --info encryptor_1.0.0-1_all.deb
+dpkg-deb --info encryptor_1.1.0-1_all.deb
 echo ""
 echo "📦 Package contents:"
-dpkg-deb --contents encryptor_1.0.0-1_all.deb
+dpkg-deb --contents encryptor_1.1.0-1_all.deb
 
 echo ""
 echo "🎉 Build completed successfully!"
-echo "💡 Test with: sudo dpkg -i encryptor_1.0.0-1_all.deb"
+echo "💡 Test with: sudo dpkg -i encryptor_1.1.0-1_all.deb"
