@@ -1,5 +1,5 @@
 Package: encryptor
-Version: 1.0.0-1
+Version: 1.1.0-1
 Architecture: all
 Maintainer: mpgamer75
 Depends: openssl (>= 1.1.0), bash (>= 4.0)

@@ -1,8 +1,8 @@
-encryptor (1.0.0-1) unstable; urgency=medium
-
-  * Initial release
-  * Multiple encryption algorithms support
-  * Interactive CLI interface
-  * Cross-platform compatibility
-
- -- mpgamer75  Sun, 24 Aug 2025 
+encryptor (1.1.0-1) unstable; urgency=medium
+  * Major upgrade with modern algorithms
+  * Added AES-256-GCM, ChaCha20-Poly1305, ECC P-256
+  * Enhanced UI with colors and performance monitoring
+  * Added batch operations and comprehensive logging
+  * Improved help system with interactive navigation
+  
+ -- mpgamer75  Sept 6 2025
