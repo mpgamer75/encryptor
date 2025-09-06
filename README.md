@@ -2,7 +2,7 @@
 
 ![Encryptor Logo](image/logo.png)
 
-# 🔐 Encryptor
+# Encryptor
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Bash](https://img.shields.io/badge/Language-Bash-green.svg)](https://www.gnu.org/software/bash/)
@@ -37,8 +37,8 @@
 
 ```bash
 # Download and install .deb package
-wget https://github.com/mpgamer75/encryptor/releases/latest/download/encryptor_1.0.0-1_all.deb
-sudo dpkg -i encryptor_1.0.0-1_all.deb
+wget https://github.com/mpgamer75/encryptor/releases/latest/download/encryptor_1.1.0-1_all.deb
+sudo dpkg -i encryptor_1.1.0-1_all.deb
 
 # Fix dependencies if needed
 sudo apt-get install -f
@@ -230,7 +230,7 @@ sudo apt install dpkg-dev debhelper fakeroot
 ./build_deb.sh
 
 # Test package
-sudo dpkg -i encryptor_1.0.0-1_all.deb
+sudo dpkg -i encryptor_1.1.0-1_all.deb
 ```
 
 ### Running Tests
