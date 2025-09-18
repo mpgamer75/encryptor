@@ -60,7 +60,7 @@ sudo apt-get install -f
 curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
 ```
 
-### 📋 Manual Installation
+### Manual Installation
 
 **For advanced users or custom setups:**
 
@@ -71,7 +71,7 @@ chmod +x install.sh
 ./install.sh
 ```
 
-### ⚡ Direct Download
+### Direct Download
 
 **Minimal setup for quick testing:**
 
@@ -95,7 +95,7 @@ encryptor
 # q) Quit
 ```
 
-## 🔐 **Encryption Algorithms**
+## **Encryption Algorithms**
 
 | Algorithm | Security Level | Best For | File Size Limit |
 |-----------|---------------|----------|-----------------|
@@ -104,7 +104,7 @@ encryptor
 | **RSA** | ⭐⭐⭐⭐ | Small files, public key crypto | < 200 bytes |
 | **3DES** | ⭐⭐⭐ | Legacy compatibility | Unlimited |
 
-### 🛡️ **Security Features**
+### **Security Features**
 
 - **PBKDF2** key derivation with salt
 - **Modern OpenSSL** commands (pkeyutl vs deprecated rsautl)
@@ -112,7 +112,7 @@ encryptor
 - **Strong random key generation** for hybrid encryption
 - **No plaintext password storage**
 
-## 🏗️ **Tech Stack**
+## **Tech Stack**
 
 - **Language**: Bash 4.0+
 - **Cryptography**: OpenSSL
@@ -120,7 +120,7 @@ encryptor
 - **Platform**: POSIX-compliant systems
 - **Package Format**: Debian (.deb) for Linux distributions
 
-## 🎯 **Project Mission**
+## **Project Mission**
 
 In an era where data breaches and privacy violations are rampant, **Encryptor** addresses the critical need for accessible, robust file encryption. Many users find existing encryption tools either too complex or lacking in security features.
 
@@ -133,7 +133,7 @@ In an era where data breaches and privacy violations are rampant, **Encryptor** 
 
 Whether you're a security professional, developer, or privacy-conscious individual, Encryptor empowers you to protect your sensitive data without compromise.
 
-## 📊 **Usage Examples**
+## **Usage Examples**
 
 ### Encrypt a Document
 
@@ -171,7 +171,7 @@ encryptor
 - **Linux/macOS/WSL** environment
 - **Terminal** with ANSI color support
 
-## 🧪 **Compatibility**
+## **Compatibility**
 
 | OS | Status | Installation Method |
 |----|--------|---------------------|
