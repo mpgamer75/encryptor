@@ -32,6 +32,8 @@
 - [Uninstallation](#uninstallation)
 - [Compatibility](#compatibility)
 - [Security Considerations](#security-considerations)
+- [Building Debian Package](#building-debian-package)
+- [GitHub Release](#github-release)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -420,6 +422,127 @@ rm -rf ~/.config/encryptor
 - **Memory Protection**: Basic password handling (no mlockall)
 - **File Metadata**: Original filename visible in encrypted file context
 - **Compression**: No built-in compression (consider pre-compression)
+
+## Building Debian Package
+
+### Prerequisites
+
+To build the Debian package, you need:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install build-essential fakeroot dpkg-dev
+
+# Verify tools
+which dpkg-deb fakeroot
+```
+
+### Build Instructions
+
+```bash
+# Navigate to project directory
+cd encryptor
+
+# Make build script executable
+chmod +x build_deb.sh
+
+# Build the package
+./build_deb.sh
+```
+
+This creates: `encryptor_2.0.0-1_all.deb`
+
+### Install Local Package
+
+```bash
+# Install the package
+sudo dpkg -i encryptor_2.0.0-1_all.deb
+
+# If dependencies are missing:
+sudo apt-get install -f
+
+# Verify installation
+encryptor --version
+which encryptor
+man encryptor
+```
+
+### Test Package
+
+```bash
+# View package information
+dpkg-deb --info encryptor_2.0.0-1_all.deb
+
+# List package contents
+dpkg-deb --contents encryptor_2.0.0-1_all.deb
+
+# Validate package (optional)
+lintian encryptor_2.0.0-1_all.deb
+```
+
+## GitHub Release
+
+### Creating a Release
+
+Follow these steps to create a GitHub release:
+
+1. **Build the Debian package**:
+   ```bash
+   ./build_deb.sh
+   ```
+
+2. **Commit and tag**:
+   ```bash
+   git add .
+   git commit -m "Release v2.0.0"
+   git tag -a v2.0.0 -m "Encryptor v2.0.0 - Modern AEAD Encryption"
+   git push origin main
+   git push origin v2.0.0
+   ```
+
+3. **Create GitHub Release**:
+   - Go to repository **Releases** section
+   - Click **Create a new release**
+   - Select tag: `v2.0.0`
+   - Title: `Encryptor v2.0.0 - Modern AEAD Encryption`
+   - Upload `encryptor_2.0.0-1_all.deb` as asset
+   - Publish release
+
+4. **Calculate checksums**:
+   ```bash
+   sha256sum encryptor_2.0.0-1_all.deb
+   ```
+   Add checksum to release notes.
+
+### Download from Release
+
+Users can download and install from GitHub releases:
+
+```bash
+# Download latest .deb package
+wget https://github.com/mpgamer75/encryptor/releases/download/v2.0.0/encryptor_2.0.0-1_all.deb
+
+# Install
+sudo dpkg -i encryptor_2.0.0-1_all.deb
+
+# Or use one-line install
+curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
+```
+
+### Release Checklist
+
+Before creating a release, ensure:
+
+- [ ] Version updated in all files (`encryptor.sh`, `install.sh`, `README.md`, `debian/control`, `debian/changelog`)
+- [ ] CHANGELOG updated with new features
+- [ ] Documentation updated
+- [ ] All tests pass
+- [ ] Build script works: `./build_deb.sh`
+- [ ] Package installs correctly: `sudo dpkg -i encryptor_2.0.0-1_all.deb`
+- [ ] One-line installer works from GitHub
+- [ ] Man page displays correctly: `man encryptor`
+
+For detailed release instructions, see [.github-release-guide.md](.github-release-guide.md)
 
 ## Contributing
 

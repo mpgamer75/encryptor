@@ -1,12 +1,15 @@
 #!/bin/bash
 
-# Simple Debian package builder
+# Debian Package Builder for Encryptor v2.0.0
 set -e
 
-echo "🚀 Building Debian package..."
+VERSION="2.0.0"
+PACKAGE_NAME="encryptor_${VERSION}-1_all.deb"
+
+echo "Building Debian package: $PACKAGE_NAME"
 
 # Clean previous builds
-rm -rf debian/tmp encryptor_* *.deb
+rm -rf debian/tmp encryptor_*.deb
 
 # Create package structure
 mkdir -p debian/tmp/usr/local/bin
@@ -14,21 +17,27 @@ mkdir -p debian/tmp/usr/share/doc/encryptor
 mkdir -p debian/tmp/usr/share/man/man1
 mkdir -p debian/tmp/DEBIAN
 
-# Copy files
+# Copy main script
+echo "Copying encryptor.sh to /usr/local/bin/encryptor..."
 cp encryptor.sh debian/tmp/usr/local/bin/encryptor
 chmod 755 debian/tmp/usr/local/bin/encryptor
 
+# Copy documentation
+echo "Copying documentation..."
 cp README.md LICENSE debian/tmp/usr/share/doc/encryptor/
 cp docs/*.md debian/tmp/usr/share/doc/encryptor/ 2>/dev/null || true
 
 # Copy and compress man page
+echo "Installing man page..."
 cp debian/encryptor.1 debian/tmp/usr/share/man/man1/
-gzip -9 debian/tmp/usr/share/man/man1/encryptor.1
+gzip -9 -f debian/tmp/usr/share/man/man1/encryptor.1
 
-# Copy control file and add installed size
+# Copy control file
+echo "Creating DEBIAN control files..."
 cp debian/control debian/tmp/DEBIAN/
+cp debian/copyright debian/tmp/usr/share/doc/encryptor/
 
-# Calculate installed size in KB
+# Calculate and add installed size
 INSTALLED_SIZE=$(du -sk debian/tmp | cut -f1)
 echo "Installed-Size: $INSTALLED_SIZE" >> debian/tmp/DEBIAN/control
 
@@ -38,17 +47,22 @@ cp debian/prerm debian/tmp/DEBIAN/
 chmod 755 debian/tmp/DEBIAN/postinst debian/tmp/DEBIAN/prerm
 
 # Build package
-fakeroot dpkg-deb --build debian/tmp encryptor_1.1.0-1_all.deb
+echo "Building .deb package..."
+fakeroot dpkg-deb --build debian/tmp "$PACKAGE_NAME"
 
-echo "✅ Package built: encryptor_1.1.0-1_all.deb"
+echo ""
+echo "Package built successfully: $PACKAGE_NAME"
+echo ""
 
 # Test package
-echo "🧪 Testing package..."
-dpkg-deb --info encryptor_1.1.0-1_all.deb
+echo "Package Information:"
+dpkg-deb --info "$PACKAGE_NAME"
 echo ""
-echo "📦 Package contents:"
-dpkg-deb --contents encryptor_1.1.0-1_all.deb
+echo "Package Contents:"
+dpkg-deb --contents "$PACKAGE_NAME"
 
 echo ""
-echo "🎉 Build completed successfully!"
-echo "💡 Test with: sudo dpkg -i encryptor_1.1.0-1_all.deb"
+echo "Build completed successfully!"
+echo ""
+echo "To install: sudo dpkg -i $PACKAGE_NAME"
+echo "To remove:  sudo dpkg -r encryptor"
