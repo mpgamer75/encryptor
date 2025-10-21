@@ -217,8 +217,9 @@ select_file_interactive() {
     echo -e "\n${DIM}Type a number, a file name, or 'q' to quit.${RESET}"
     
     while true; do
-        local choice
-        choice=$(prompt_input "$prompt_text")
+        echo -en "\n${MAGENTA}${BOLD}$prompt_text${RESET}"
+        read -r choice
+        choice=$(echo "$choice" | xargs)  # Trim whitespace but keep spaces in filenames
         
         if [[ "$choice" == "q" || "$choice" == "Q" ]]; then
             return 1
@@ -232,6 +233,7 @@ select_file_interactive() {
             return 0
         else
             echo -e "${RED}Invalid choice or file does not exist. Try again.${RESET}"
+            sleep 1
         fi
     done
 }
@@ -281,8 +283,9 @@ select_algorithm_menu() {
     echo -e "\n${DIM}Type a number or 'q' to quit.${RESET}"
     
     while true; do
-        local choice
-        choice=$(prompt_input "Your algorithm choice: ")
+        echo -en "\n${MAGENTA}${BOLD}Your algorithm choice: ${RESET}"
+        read -r choice
+        choice=$(echo "$choice" | tr -d '[:space:]')
         
         if [[ "$choice" == "q" || "$choice" == "Q" ]]; then
             return 1
@@ -293,6 +296,7 @@ select_algorithm_menu() {
             return 0
         else
             echo -e "${RED}Invalid choice. Try again.${RESET}"
+            sleep 1
         fi
     done
 }
@@ -579,8 +583,9 @@ manage_certificates() {
         echo -e "  ${YELLOW}${BOLD}[5]${RESET} ${WHITE}List managed certificates and keys${RESET}"
         echo -e "  ${YELLOW}${BOLD}[q]${RESET} ${WHITE}Return to Main Menu${RESET}"
         
-        local choice
-        choice=$(prompt_input "Your choice: ")
+        echo -en "\n${MAGENTA}${BOLD}Your choice: ${RESET}"
+        read -r choice
+        choice=$(echo "$choice" | tr -d '[:space:]')
 
         case "$choice" in
             1) # Create CA
@@ -668,7 +673,8 @@ manage_certificates() {
                 break
                 ;;
             *)
-                echo -e "${RED}Invalid choice.${RESET}"
+                echo -e "${RED}Invalid choice. Try again.${RESET}"
+                sleep 1
                 ;;
         esac
     done
@@ -727,8 +733,9 @@ security_audit_menu() {
         echo -e "  ${YELLOW}${BOLD}[3]${RESET} ${WHITE}Install / Update testssl.sh${RESET}"
         echo -e "  ${YELLOW}${BOLD}[q]${RESET} ${WHITE}Return to Main Menu${RESET}"
         
-        local choice
-        choice=$(prompt_input "Your choice: ")
+        echo -en "\n${MAGENTA}${BOLD}Your choice: ${RESET}"
+        read -r choice
+        choice=$(echo "$choice" | tr -d '[:space:]')
 
         case "$choice" in
             1)  # Local Audit
@@ -780,7 +787,10 @@ security_audit_menu() {
             2) run_testssl ;;
             3) install_testssl ;;
             q|Q) break ;;
-            *) echo -e "${RED}Invalid choice.${RESET}" ;;
+            *)
+                echo -e "${RED}Invalid choice. Try again.${RESET}"
+                sleep 1
+                ;;
         esac
     done
 }
