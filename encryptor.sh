@@ -455,13 +455,30 @@ process_encryption() {
             ;;
             
         "smime")
-            local cert_file
-            cert_file=$(prompt_input "Path to recipient's certificate (.pem): ")
+            echo -e "\n${CYAN}${BOLD}S/MIME Certificate-Based Encryption${RESET}"
+            echo -e "${DIM}You need the recipient's certificate (.pem or .crt file)${RESET}\n"
+            
+            # List available certificates
+            if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.pem 2>/dev/null)" ]]; then
+                echo -e "${BLUE}Available certificates in $CERT_DIR:${RESET}"
+                local cert_num=1
+                for cert in "$CERT_DIR"/*.pem; do
+                    [[ -f "$cert" ]] && echo -e "  ${YELLOW}[$cert_num]${RESET} $(basename "$cert")"
+                    ((cert_num++))
+                done
+                echo -e "${DIM}Or type the full path to another certificate${RESET}"
+            fi
+            
+            echo -en "\n${MAGENTA}${BOLD}Path to recipient's certificate: ${RESET}"
+            read -r cert_file
+            cert_file=$(echo "$cert_file" | xargs)
+            
             if [[ ! -f "$cert_file" ]]; then
-                error_msg="Recipient certificate file not found."
+                error_msg="Recipient certificate file not found: $cert_file"
                 cmd_status=1
             else
                 # S/MIME using AES-256-GCM
+                echo -e "${CYAN}Encrypting with S/MIME...${RESET}"
                 openssl smime -encrypt -aes256-gcm -in "$file_to_encrypt" -out "$output_file" \
                     -outform PEM "$cert_file" 2> "$TEMP_DIR/openssl.err"
                 cmd_status=$?
@@ -540,15 +557,49 @@ process_decryption() {
             ;;
             
         "smime")
-            local priv_key_file
-            priv_key_file=$(prompt_input "Path to your private key (.pem): ")
-            local cert_file
-            cert_file=$(prompt_input "Path to your certificate (.pem): ")
+            echo -e "\n${CYAN}${BOLD}S/MIME Certificate-Based Decryption${RESET}"
+            echo -e "${DIM}You need YOUR private key and certificate${RESET}\n"
+            
+            # List available keys and certificates
+            if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.key 2>/dev/null)" ]]; then
+                echo -e "${BLUE}Available keys in $CERT_DIR:${RESET}"
+                for key in "$CERT_DIR"/*.key; do
+                    [[ -f "$key" ]] && echo -e "  ${YELLOW}→${RESET} $(basename "$key")"
+                done
+                echo
+                echo -e "${BLUE}Available certificates in $CERT_DIR:${RESET}"
+                for cert in "$CERT_DIR"/*.pem; do
+                    [[ -f "$cert" ]] && echo -e "  ${YELLOW}→${RESET} $(basename "$cert")"
+                done
+                echo -e "${DIM}You can type the filename or full path${RESET}"
+            fi
+            
+            echo -en "\n${MAGENTA}${BOLD}Path to your private key (.key): ${RESET}"
+            read -r priv_key_file
+            priv_key_file=$(echo "$priv_key_file" | xargs)
+            
+            # Auto-complete path if just filename provided
+            if [[ ! -f "$priv_key_file" ]] && [[ -f "$CERT_DIR/$priv_key_file" ]]; then
+                priv_key_file="$CERT_DIR/$priv_key_file"
+            fi
+            
+            echo -en "${MAGENTA}${BOLD}Path to your certificate (.pem): ${RESET}"
+            read -r cert_file
+            cert_file=$(echo "$cert_file" | xargs)
+            
+            # Auto-complete path if just filename provided
+            if [[ ! -f "$cert_file" ]] && [[ -f "$CERT_DIR/$cert_file" ]]; then
+                cert_file="$CERT_DIR/$cert_file"
+            fi
             
             if [[ ! -f "$priv_key_file" ]] || [[ ! -f "$cert_file" ]]; then
                 error_msg="Private key or certificate file not found."
+                echo -e "${RED}Error: Could not find files${RESET}"
+                [[ ! -f "$priv_key_file" ]] && echo -e "${RED}  Private key: $priv_key_file${RESET}"
+                [[ ! -f "$cert_file" ]] && echo -e "${RED}  Certificate: $cert_file${RESET}"
                 cmd_status=1
             else
+                echo -e "${CYAN}Decrypting with S/MIME...${RESET}"
                 openssl smime -decrypt -in "$file_to_decrypt" -out "$output_file" \
                     -inform PEM -recip "$cert_file" -inkey "$priv_key_file" 2> "$TEMP_DIR/openssl.err"
                 cmd_status=$?
@@ -589,83 +640,252 @@ manage_certificates() {
 
         case "$choice" in
             1) # Create CA
-                echo -e "${CYAN}Creating Root Certificate Authority (self-signed)...${RESET}"
-                local ca_name
-                ca_name=$(prompt_input "Name for CA (e.g., MyRootCA): " "MyRootCA")
+                print_section_header "Create Root Certificate Authority (CA)"
+                echo -e "${CYAN}${BOLD}What is a Root CA?${RESET}"
+                echo -e "${DIM}A Certificate Authority is used to sign and issue other certificates.${RESET}"
+                echo -e "${DIM}This creates a self-signed root certificate for your own PKI.${RESET}\n"
+                
+                echo -e "${YELLOW}Generated files:${RESET}"
+                echo -e "  ${WHITE}→${RESET} CA private key (.key) - ${RED}Keep this secret!${RESET}"
+                echo -e "  ${WHITE}→${RESET} CA certificate (.pem) - Can share publicly\n"
+                
+                echo -en "${MAGENTA}${BOLD}Name for your CA (e.g., MyRootCA) [default: MyRootCA]: ${RESET}"
+                read -r ca_name
+                ca_name=$(echo "$ca_name" | xargs)
+                [[ -z "$ca_name" ]] && ca_name="MyRootCA"
+                
                 local ca_key="$CERT_DIR/${ca_name}.key"
                 local ca_cert="$CERT_DIR/${ca_name}.pem"
                 
-                if [[ -f "$ca_key" || -f "$ca_cert" ]]; then
-                    echo -e "${RED}Error: Files for this CA already exist.${RESET}"
+                if [[ -f "$ca_key" ]] || [[ -f "$ca_cert" ]]; then
+                    echo -e "\n${RED}${BOLD}Error:${RESET} Files for CA '$ca_name' already exist!"
+                    echo -e "${YELLOW}Existing files:${RESET}"
+                    [[ -f "$ca_key" ]] && echo -e "  ${WHITE}→${RESET} $ca_key"
+                    [[ -f "$ca_cert" ]] && echo -e "  ${WHITE}→${RESET} $ca_cert"
+                    echo -e "\n${DIM}Tip: Choose a different name or delete existing files first${RESET}"
                 else
+                    echo -e "\n${CYAN}Generating 4096-bit RSA CA (this may take a moment)...${RESET}"
                     openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 \
                         -nodes -keyout "$ca_key" -out "$ca_cert" \
-                        -subj "/C=US/ST=California/L=Local/O=Encryptor/OU=CA/CN=$ca_name"
+                        -subj "/C=US/ST=California/L=Local/O=Encryptor/OU=CA/CN=$ca_name" 2>/dev/null
                     chmod 400 "$ca_key"
-                    echo -e "${GREEN}CA created successfully:${RESET}"
-                    echo -e "  Private Key: $ca_key ${DIM}(Permissions 400)${RESET}"
-                    echo -e "  Certificate: $ca_cert"
+                    
+                    echo -e "\n${GREEN}${BOLD}✓ Root CA created successfully!${RESET}\n"
+                    echo -e "${WHITE}${BOLD}Files created:${RESET}"
+                    echo -e "  ${YELLOW}Private Key:${RESET}  $ca_key ${RED}(Permissions: 400)${RESET}"
+                    echo -e "  ${YELLOW}Certificate:${RESET}  $ca_cert ${GREEN}(Valid: 10 years)${RESET}\n"
+                    echo -e "${CYAN}${BOLD}Next steps:${RESET}"
+                    echo -e "  ${WHITE}→${RESET} Use option ${BOLD}[3]${RESET} to sign certificate requests with this CA"
+                    echo -e "  ${WHITE}→${RESET} Keep the .key file ${RED}secure${RESET} - anyone with it can forge certificates!"
                 fi
                 press_enter_to_continue
                 ;;
             2) # Generate Key + CSR
-                echo -e "${CYAN}Generating Private Key and CSR...${RESET}"
-                local key_name
-                key_name=$(prompt_input "Name for key/CSR (e.g., my_key): " "my_key")
+                print_section_header "Generate Private Key and Certificate Request"
+                echo -e "${CYAN}${BOLD}What is this?${RESET}"
+                echo -e "${DIM}Creates a private key and CSR (Certificate Signing Request).${RESET}"
+                echo -e "${DIM}The CSR can then be signed by a CA to get a valid certificate.${RESET}\n"
+                
+                echo -e "${YELLOW}Generated files:${RESET}"
+                echo -e "  ${WHITE}→${RESET} Private key (.key) - ${RED}Keep this secret!${RESET}"
+                echo -e "  ${WHITE}→${RESET} Certificate request (.csr) - Send this to CA for signing\n"
+                
+                echo -en "${MAGENTA}${BOLD}Name for this key (e.g., server1, user_john) [default: my_key]: ${RESET}"
+                read -r key_name
+                key_name=$(echo "$key_name" | xargs)
+                [[ -z "$key_name" ]] && key_name="my_key"
+                
                 local priv_key="$CERT_DIR/${key_name}.key"
                 local csr_file="$CERT_DIR/${key_name}.csr"
                 
                 if [[ -f "$priv_key" ]]; then
-                    echo -e "${RED}Error: Key file already exists.${RESET}"
+                    echo -e "\n${RED}${BOLD}Error:${RESET} Key '$key_name.key' already exists!"
+                    echo -e "${YELLOW}Existing file:${RESET} $priv_key"
+                    echo -e "${DIM}Tip: Choose a different name or delete existing file first${RESET}"
                 else
+                    echo -e "\n${CYAN}Generating 2048-bit RSA key pair...${RESET}"
                     openssl req -new -newkey rsa:2048 -sha256 \
                         -nodes -keyout "$priv_key" -out "$csr_file" \
-                        -subj "/C=US/ST=California/L=Local/O=Encryptor/OU=User/CN=$key_name"
+                        -subj "/C=US/ST=California/L=Local/O=Encryptor/OU=User/CN=$key_name" 2>/dev/null
                     chmod 400 "$priv_key"
-                    echo -e "${GREEN}Key and CSR created:${RESET}"
-                    echo -e "  Private Key: $priv_key ${DIM}(Permissions 400)${RESET}"
-                    echo -e "  Request (CSR): $csr_file"
+                    
+                    echo -e "\n${GREEN}${BOLD}✓ Key and CSR created successfully!${RESET}\n"
+                    echo -e "${WHITE}${BOLD}Files created:${RESET}"
+                    echo -e "  ${YELLOW}Private Key:${RESET}  $priv_key ${RED}(Permissions: 400)${RESET}"
+                    echo -e "  ${YELLOW}CSR Request:${RESET}  $csr_file\n"
+                    echo -e "${CYAN}${BOLD}Next steps:${RESET}"
+                    echo -e "  ${WHITE}→${RESET} Use option ${BOLD}[3]${RESET} to sign this CSR with your CA"
+                    echo -e "  ${WHITE}→${RESET} Or send the .csr file to an external CA for signing"
                 fi
                 press_enter_to_continue
                 ;;
             3) # Sign CSR
-                echo -e "${CYAN}Signing CSR with a CA...${RESET}"
-                local csr_file
-                csr_file=$(prompt_input "Path to CSR to sign: ")
-                local ca_cert
-                ca_cert=$(prompt_input "Path to CA certificate: ")
-                local ca_key
-                ca_key=$(prompt_input "Path to CA private key: ")
+                print_section_header "Sign Certificate Signing Request with CA"
+                echo -e "${CYAN}${BOLD}What does this do?${RESET}"
+                echo -e "${DIM}Signs a CSR with your CA to create a valid certificate.${RESET}"
+                echo -e "${DIM}You need: CSR file, CA certificate, and CA private key.${RESET}\n"
+                
+                # List available CSRs
+                echo -e "${BLUE}${BOLD}Available CSRs in $CERT_DIR:${RESET}"
+                local csr_found=0
+                for csr in "$CERT_DIR"/*.csr; do
+                    if [[ -f "$csr" ]]; then
+                        echo -e "  ${YELLOW}→${RESET} $(basename "$csr")"
+                        csr_found=1
+                    fi
+                done
+                [[ $csr_found -eq 0 ]] && echo -e "  ${DIM}(No .csr files found)${RESET}"
+                
+                echo -en "\n${MAGENTA}${BOLD}Path to CSR file: ${RESET}"
+                read -r csr_file
+                csr_file=$(echo "$csr_file" | xargs)
+                [[ ! -f "$csr_file" ]] && [[ -f "$CERT_DIR/$csr_file" ]] && csr_file="$CERT_DIR/$csr_file"
+                
+                # List available CA certificates
+                echo -e "\n${BLUE}${BOLD}Available CA certificates in $CERT_DIR:${RESET}"
+                local ca_found=0
+                for ca in "$CERT_DIR"/*.pem; do
+                    if [[ -f "$ca" ]]; then
+                        echo -e "  ${YELLOW}→${RESET} $(basename "$ca")"
+                        ca_found=1
+                    fi
+                done
+                [[ $ca_found -eq 0 ]] && echo -e "  ${DIM}(No .pem files found - create a CA first!)${RESET}"
+                
+                echo -en "\n${MAGENTA}${BOLD}Path to CA certificate (.pem): ${RESET}"
+                read -r ca_cert
+                ca_cert=$(echo "$ca_cert" | xargs)
+                [[ ! -f "$ca_cert" ]] && [[ -f "$CERT_DIR/$ca_cert" ]] && ca_cert="$CERT_DIR/$ca_cert"
+                
+                echo -en "${MAGENTA}${BOLD}Path to CA private key (.key): ${RESET}"
+                read -r ca_key
+                ca_key=$(echo "$ca_key" | xargs)
+                [[ ! -f "$ca_key" ]] && [[ -f "$CERT_DIR/$ca_key" ]] && ca_key="$CERT_DIR/$ca_key"
+                
                 local cert_out="$CERT_DIR/$(basename "${csr_file%.csr}").pem"
                 
-                if [[ ! -f "$csr_file" || ! -f "$ca_cert" || ! -f "$ca_key" ]]; then
-                    echo -e "${RED}Error: CSR, CA cert, or CA key file not found.${RESET}"
+                if [[ ! -f "$csr_file" ]] || [[ ! -f "$ca_cert" ]] || [[ ! -f "$ca_key" ]]; then
+                    echo -e "\n${RED}${BOLD}Error: Required files not found!${RESET}"
+                    [[ ! -f "$csr_file" ]] && echo -e "${RED}  CSR file: $csr_file${RESET}"
+                    [[ ! -f "$ca_cert" ]] && echo -e "${RED}  CA certificate: $ca_cert${RESET}"
+                    [[ ! -f "$ca_key" ]] && echo -e "${RED}  CA private key: $ca_key${RESET}"
                 else
+                    echo -e "\n${CYAN}Signing certificate (valid for 1 year)...${RESET}"
                     openssl x509 -req -in "$csr_file" -CA "$ca_cert" -CAkey "$ca_key" \
-                        -CAcreateserial -out "$cert_out" -days 365 -sha256
-                    echo -e "${GREEN}Signed certificate created successfully:${RESET}"
-                    echo -e "  Certificate: $cert_out"
+                        -CAcreateserial -out "$cert_out" -days 365 -sha256 2>/dev/null
+                    
+                    echo -e "\n${GREEN}${BOLD}✓ Certificate signed successfully!${RESET}\n"
+                    echo -e "${WHITE}${BOLD}Output file:${RESET}"
+                    echo -e "  ${YELLOW}Signed Certificate:${RESET}  $cert_out ${GREEN}(Valid: 1 year)${RESET}\n"
+                    echo -e "${CYAN}${BOLD}Next steps:${RESET}"
+                    echo -e "  ${WHITE}→${RESET} Use option ${BOLD}[4]${RESET} to inspect the certificate"
+                    echo -e "  ${WHITE}→${RESET} Distribute this certificate to users/servers"
                 fi
                 press_enter_to_continue
                 ;;
             4) # Inspect
-                echo -e "${CYAN}Inspecting a certificate or CSR...${RESET}"
-                local file_to_inspect
-                file_to_inspect=$(prompt_input "File to inspect (.pem, .crt, .csr): ")
+                print_section_header "Inspect Certificate or CSR"
+                echo -e "${CYAN}${BOLD}View detailed information about certificates or CSRs${RESET}\n"
+                
+                echo -e "${BLUE}${BOLD}Available files in $CERT_DIR:${RESET}"
+                echo -e "${YELLOW}Certificates (.pem):${RESET}"
+                local has_pem=0
+                for cert in "$CERT_DIR"/*.pem; do
+                    if [[ -f "$cert" ]]; then
+                        echo -e "  ${WHITE}→${RESET} $(basename "$cert")"
+                        has_pem=1
+                    fi
+                done
+                [[ $has_pem -eq 0 ]] && echo -e "  ${DIM}(none)${RESET}"
+                
+                echo -e "\n${YELLOW}Certificate Requests (.csr):${RESET}"
+                local has_csr=0
+                for csr in "$CERT_DIR"/*.csr; do
+                    if [[ -f "$csr" ]]; then
+                        echo -e "  ${WHITE}→${RESET} $(basename "$csr")"
+                        has_csr=1
+                    fi
+                done
+                [[ $has_csr -eq 0 ]] && echo -e "  ${DIM}(none)${RESET}"
+                
+                echo -en "\n${MAGENTA}${BOLD}File to inspect (filename or path): ${RESET}"
+                read -r file_to_inspect
+                file_to_inspect=$(echo "$file_to_inspect" | xargs)
+                
+                # Auto-complete path
+                if [[ ! -f "$file_to_inspect" ]] && [[ -f "$CERT_DIR/$file_to_inspect" ]]; then
+                    file_to_inspect="$CERT_DIR/$file_to_inspect"
+                fi
+                
                 if [[ ! -f "$file_to_inspect" ]]; then
-                    echo -e "${RED}File not found.${RESET}"
+                    echo -e "\n${RED}${BOLD}Error:${RESET} File not found: $file_to_inspect"
+                    echo -e "${DIM}Tip: You can type just the filename if it's in $CERT_DIR${RESET}"
                 elif [[ "$file_to_inspect" == *.csr ]]; then
+                    echo -e "\n${CYAN}Displaying CSR details...${RESET}\n"
                     openssl req -in "$file_to_inspect" -noout -text | less
                 else
+                    echo -e "\n${CYAN}Displaying certificate details...${RESET}\n"
                     openssl x509 -in "$file_to_inspect" -noout -text | less
                 fi
                 ;;
             5) # List
-                print_section_header "Managed Certificates & Keys ($CERT_DIR)"
-                if [[ -z "$(ls -A "$CERT_DIR")" ]]; then
-                    echo -e "${DIM}(No managed files found)${RESET}"
+                print_section_header "Managed Certificates & Keys"
+                echo -e "${DIM}Location: $CERT_DIR${RESET}\n"
+                
+                if [[ ! -d "$CERT_DIR" ]] || [[ -z "$(ls -A "$CERT_DIR" 2>/dev/null)" ]]; then
+                    echo -e "${YELLOW}No managed files found yet.${RESET}"
+                    echo -e "${DIM}Use options [1] or [2] to create certificates.${RESET}"
                 else
-                    ls -lF "$CERT_DIR"
+                    # CA Certificates
+                    echo -e "${GREEN}${BOLD}Root CA Certificates (.pem):${RESET}"
+                    local has_ca=0
+                    for cert in "$CERT_DIR"/*.pem; do
+                        if [[ -f "$cert" ]]; then
+                            local size=$(stat -c%s "$cert" 2>/dev/null || stat -f%z "$cert" 2>/dev/null)
+                            local size_kb=$((size / 1024))
+                            echo -e "  ${YELLOW}→${RESET} $(basename "$cert") ${DIM}(${size_kb}KB)${RESET}"
+                            has_ca=1
+                        fi
+                    done
+                    [[ $has_ca -eq 0 ]] && echo -e "  ${DIM}(none)${RESET}"
+                    
+                    # Private Keys
+                    echo -e "\n${RED}${BOLD}Private Keys (.key):${RESET} ${DIM}[Keep these secure!]${RESET}"
+                    local has_key=0
+                    for key in "$CERT_DIR"/*.key; do
+                        if [[ -f "$key" ]]; then
+                            local perms=$(stat -c "%a" "$key" 2>/dev/null || stat -f "%Lp" "$key" 2>/dev/null)
+                            local perm_status="${GREEN}✓${RESET}"
+                            [[ "$perms" != "400" && "$perms" != "600" ]] && perm_status="${RED}⚠${RESET}"
+                            echo -e "  ${YELLOW}→${RESET} $(basename "$key") ${DIM}(Perms: $perms) $perm_status${RESET}"
+                            has_key=1
+                        fi
+                    done
+                    [[ $has_key -eq 0 ]] && echo -e "  ${DIM}(none)${RESET}"
+                    
+                    # CSRs
+                    echo -e "\n${BLUE}${BOLD}Certificate Requests (.csr):${RESET}"
+                    local has_csr=0
+                    for csr in "$CERT_DIR"/*.csr; do
+                        if [[ -f "$csr" ]]; then
+                            echo -e "  ${YELLOW}→${RESET} $(basename "$csr")"
+                            has_csr=1
+                        fi
+                    done
+                    [[ $has_csr -eq 0 ]] && echo -e "  ${DIM}(none)${RESET}"
+                    
+                    # Other files
+                    echo -e "\n${CYAN}${BOLD}Other Files:${RESET}"
+                    local has_other=0
+                    for file in "$CERT_DIR"/*; do
+                        if [[ -f "$file" ]] && [[ ! "$file" =~ \.(pem|key|csr)$ ]]; then
+                            echo -e "  ${YELLOW}→${RESET} $(basename "$file")"
+                            has_other=1
+                        fi
+                    done
+                    [[ $has_other -eq 0 ]] && echo -e "  ${DIM}(none)${RESET}"
+                    
+                    echo -e "\n${WHITE}${BOLD}Total files:${RESET} $(ls -1 "$CERT_DIR" | wc -l)"
                 fi
                 press_enter_to_continue
                 ;;
