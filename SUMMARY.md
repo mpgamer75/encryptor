@@ -251,3 +251,4 @@ curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh
 
 Follow the steps in `RELEASE_STEPS.md` for a quick release, or see `.github-release-guide.md` for detailed instructions.
 
+

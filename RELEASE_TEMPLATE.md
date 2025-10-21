@@ -111,7 +111,7 @@ curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh
 
 **SHA256:**
 ```
-[REPLACE WITH ACTUAL SHA256 AFTER BUILD]
+97a2efb6bb8671cc5526bd6b6047e6cad75cfcfb77999a718618079585621898
 ```
 
 To verify:
@@ -136,4 +136,5 @@ MIT License - See [LICENSE](https://github.com/mpgamer75/encryptor/blob/main/LIC
 ---
 
 **Full Changelog**: https://github.com/mpgamer75/encryptor/compare/v1.0.0...v2.0.0
+
 

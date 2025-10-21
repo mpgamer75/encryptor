@@ -74,13 +74,13 @@ print_header() {
  ███████╗███╗   ██╗ ██████╗██████╗ ██╗   ██╗██████╗ ████████╗ ██████╗ ██████╗ 
  ██╔════╝████╗  ██║██╔════╝██╔══██╗╚██╗ ██╔╝██╔══██╗╚══██╔══╝██╔═══██╗██╔══██╗
  █████╗  ██╔██╗ ██║██║     ██████╔╝ ╚████╔╝ ██████╔╝   ██║   ██║   ██║██████╔╝
- ██╔══╝  ██║╚██╗██║██║     ██╔══██╗  ╚██╔╝  ██═══╝    ██║   ██║   ██║██╔══██╗
+ ██╔══╝  ██║╚██╗██║██║     ██╔══██╗  ╚██╔╝  ██╔═══╝    ██║   ██║   ██║██╔══██╗
  ███████╗██║ ╚████║╚██████╗██║  ██║   ██║   ██║        ██║   ╚██████╔╝██║  ██║
  ╚══════╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚═╝        ╚═╝    ╚═════╝ ╚═╝  ╚═╝
 EOF
     echo -e "${RESET}"
-    echo -e "${CYAN}${BOLD}                    Advanced Encryption Tool v$VERSION${RESET}"
-    echo -e "${DIM}                      Config: $CONFIG_DIR${RESET}"
+    echo -e "${CYAN}${BOLD}                   Advanced Encryption Tool v$VERSION${RESET}"
+    echo -e "${DIM}                        Config: $CONFIG_DIR${RESET}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${RESET}"
 }
 
@@ -97,12 +97,15 @@ prompt_input() {
     local default_value="$2"
     local input_var
     
-    echo -en "${MAGENTA}${BOLD}$prompt_text ${RESET}"
+    echo -en "${MAGENTA}${BOLD}$prompt_text${RESET}"
     if [[ -n "$default_value" ]]; then
-        echo -en "${DIM}[$default_value]${RESET} "
+        echo -en " ${DIM}[$default_value]${RESET} "
     fi
     
     read -r input_var
+    
+    # Trim whitespace
+    input_var=$(echo "$input_var" | xargs)
     
     if [[ -z "$input_var" && -n "$default_value" ]]; then
         echo "$default_value"
@@ -797,8 +800,11 @@ main_menu() {
         echo -e "  ${CYAN}${BOLD}[q]${RESET} ${WHITE}Quit${RESET}"
         echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${RESET}"
         
-        local choice
-        choice=$(prompt_input "Your choice: ")
+        echo -en "\n${MAGENTA}${BOLD}Your choice: ${RESET}"
+        read -r choice
+        
+        # Trim whitespace and normalize input
+        choice=$(echo "$choice" | tr -d '[:space:]')
 
         case "$choice" in
             1) list_files_simple ;;
