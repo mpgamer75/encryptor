@@ -196,7 +196,7 @@ select_file_interactive() {
     local files=()
     local i=1
     
-    print_section_header "File Selector"
+    print_section_header "File Selector" >&2
     
     # Load only files into the array
     for item in *; do
@@ -204,20 +204,20 @@ select_file_interactive() {
     done
 
     if [[ ${#files[@]} -eq 0 ]]; then
-        echo -e "${YELLOW}No files found in this directory.${RESET}"
+        echo -e "${YELLOW}No files found in this directory.${RESET}" >&2
         return 1
     fi
     
     # Display numbered files
     for file in "${files[@]}"; do
-        echo -e "  ${YELLOW}${BOLD}[$i]${RESET} $file"
+        echo -e "  ${YELLOW}${BOLD}[$i]${RESET} $file" >&2
         ((i++))
     done
     
-    echo -e "\n${DIM}Type a number, a file name, or 'q' to quit.${RESET}"
+    echo -e "\n${DIM}Type a number, a file name, or 'q' to quit.${RESET}" >&2
     
     while true; do
-        echo -en "\n${MAGENTA}${BOLD}$prompt_text${RESET}"
+        echo -en "\n${MAGENTA}${BOLD}$prompt_text${RESET}" >&2
         read -r choice
         choice=$(echo "$choice" | xargs)  # Trim whitespace but keep spaces in filenames
         
@@ -232,7 +232,7 @@ select_file_interactive() {
             echo "$choice"
             return 0
         else
-            echo -e "${RED}Invalid choice or file does not exist. Try again.${RESET}"
+            echo -e "${RED}Invalid choice or file does not exist. Try again.${RESET}" >&2
             sleep 1
         fi
     done
@@ -250,8 +250,8 @@ ALGORITHMS=(
 )
 
 select_algorithm_menu() {
-    print_section_header "Select Encryption Algorithm"
-    echo -e "${DIM}Only modern, secure AEAD (Authenticated Encryption) ciphers are listed.${RESET}"
+    print_section_header "Select Encryption Algorithm" >&2
+    echo -e "${DIM}Only modern, secure AEAD (Authenticated Encryption) ciphers are listed.${RESET}" >&2
     
     local i=1
     local options=()
@@ -272,18 +272,18 @@ select_algorithm_menu() {
             type_label="(Asymmetric, Certificate-based)"
         fi
         
-        echo -e "\n  ${YELLOW}${BOLD}[$i]${RESET} ${WHITE}${BOLD}$key${RESET}"
-        echo -e "      ${DIM}Type: $type_label${RESET}"
-        echo -e "      ${DIM}Desc: $desc${RESET}"
+        echo -e "\n  ${YELLOW}${BOLD}[$i]${RESET} ${WHITE}${BOLD}$key${RESET}" >&2
+        echo -e "      ${DIM}Type: $type_label${RESET}" >&2
+        echo -e "      ${DIM}Desc: $desc${RESET}" >&2
         
         options+=("$key")
         ((i++))
     done
 
-    echo -e "\n${DIM}Type a number or 'q' to quit.${RESET}"
+    echo -e "\n${DIM}Type a number or 'q' to quit.${RESET}" >&2
     
     while true; do
-        echo -en "\n${MAGENTA}${BOLD}Your algorithm choice: ${RESET}"
+        echo -en "\n${MAGENTA}${BOLD}Your algorithm choice: ${RESET}" >&2
         read -r choice
         choice=$(echo "$choice" | tr -d '[:space:]')
         
@@ -295,7 +295,7 @@ select_algorithm_menu() {
             echo "${ALGORITHMS[$selected_key]}" | cut -d: -f1
             return 0
         else
-            echo -e "${RED}Invalid choice. Try again.${RESET}"
+            echo -e "${RED}Invalid choice. Try again.${RESET}" >&2
             sleep 1
         fi
     done

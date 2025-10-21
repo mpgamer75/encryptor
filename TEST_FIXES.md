@@ -139,3 +139,4 @@ Cette fonction reste utilisée ailleurs dans le code pour:
 **Version**: 2.0.0  
 **Testeur**: À tester sur Linux
 
+

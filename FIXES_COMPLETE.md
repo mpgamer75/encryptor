@@ -259,3 +259,4 @@ Si tu rencontres encore des problèmes:
 **Auteur**: Assistant IA  
 **Validé**: Syntaxe bash OK, Linting OK
 
+
