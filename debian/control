@@ -1,5 +1,5 @@
 Package: encryptor
-Version: 1.1.0-1
+Version: 2.0.0-1
 Architecture: all
 Maintainer: mpgamer75
 Depends: openssl (>= 1.1.0), bash (>= 4.0)
@@ -7,14 +7,15 @@ Recommends: curl, wget
 Section: utils
 Priority: optional
 Homepage: https://github.com/mpgamer75/encryptor
-Description: Advanced file encryption tool with multiple algorithms
+Description: Advanced file encryption tool with modern AEAD algorithms
  Encryptor is a powerful, user-friendly command-line encryption tool that
  provides security for your files. Built with pure Bash and OpenSSL, it
- offers multiple encryption algorithms with an intuitive interface.
+ offers modern AEAD algorithms with comprehensive certificate management.
  .
  Features:
-  - Multiple encryption algorithms: AES-256, RSA, Hybrid AES+RSA, 3DES
+  - Modern AEAD ciphers: AES-256-GCM, ChaCha20-Poly1305
+  - S/MIME certificate-based encryption
+  - X.509 certificate management (CA, CSR, signing)
+  - Security audit tools (local + testssl.sh)
   - Beautiful CLI interface with colorful, intuitive menus
-  - Military-grade security with industry-standard encryption
   - Cross-platform compatibility (Linux, macOS, WSL)
-  - Automatic key management and secure file handling

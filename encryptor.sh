@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ==============================================================================
-# ENCRYPTOR v2.3.0
+# ENCRYPTOR v2.0.0
 # Advanced CLI Encryption Tool
 # ==============================================================================
 
 # --- Configuration and Constants ---
-VERSION="2.1.0"
+VERSION="2.0.0"
 CONFIG_DIR="$HOME/.config/encryptor"
 CERT_DIR="$CONFIG_DIR/certs"
 TOOLS_DIR="$CONFIG_DIR/tools"

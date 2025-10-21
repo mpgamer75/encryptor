@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Encryptor Installation Script - v2.2.0
+# Encryptor Installation Script - v2.0.0
 set -e
 
 # Colors
@@ -13,7 +13,7 @@ BOLD="\e[1m"
 RESET="\e[0m"
 
 # Constants
-VERSION="2.1.0"
+VERSION="2.0.0"
 SCRIPT_NAME="encryptor.sh"
 BINARY_NAME="encryptor"
 GITHUB_URL="https://raw.githubusercontent.com/mpgamer75/encryptor/main"
