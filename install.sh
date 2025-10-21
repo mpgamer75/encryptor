@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Encryptor Installation Script - Simplified and Fixed Version
+# Encryptor Installation Script - v2.2.0
 set -e
 
 # Colors
@@ -13,7 +13,7 @@ BOLD="\e[1m"
 RESET="\e[0m"
 
 # Constants
-VERSION="1.1.0"
+VERSION="2.1.0"
 SCRIPT_NAME="encryptor.sh"
 BINARY_NAME="encryptor"
 GITHUB_URL="https://raw.githubusercontent.com/mpgamer75/encryptor/main"
@@ -24,7 +24,7 @@ print_header() {
  ███████╗███╗   ██╗ ██████╗██████╗ ██╗   ██╗██████╗ ████████╗ ██████╗ ██████╗ 
  ██╔════╝████╗  ██║██╔════╝██╔══██╗╚██╗ ██╔╝██╔══██╗╚══██╔══╝██╔═══██╗██╔══██╗
  █████╗  ██╔██╗ ██║██║     ██████╔╝ ╚████╔╝ ██████╔╝   ██║   ██║   ██║██████╔╝
- ██╔══╝  ██║╚██╗██║██║     ██╔══██╗  ╚██╔╝  ██╔═══╝    ██║   ██║   ██║██╔══██╗
+ ██╔══╝  ██║╚██╗██║██║     ██╔══██╗  ╚██╔╝  ██═══╝    ██║   ██║   ██║██╔══██╗
  ███████╗██║ ╚████║╚██████╗██║  ██║   ██║   ██║        ██║   ╚██████╔╝██║  ██║
  ╚══════╝╚═╝  ╚═══╝ ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚═╝        ╚═╝    ╚═════╝ ╚═╝  ╚═╝
 EOF
@@ -38,28 +38,61 @@ EOF
 
 check_requirements() {
     echo -e "${BLUE}Checking system requirements...${RESET}"
+    local missing_pkg=0
     
-    # Check Bash version
+    # Check Bash
     if ! command -v bash >/dev/null 2>&1; then
         echo -e "${RED}Error: Bash not found${RESET}"
-        exit 1
+        missing_pkg=1
+    else
+        bash_version=$(bash --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
+        echo -e "${GREEN}✅ Bash $bash_version detected${RESET}"
     fi
-    
-    bash_version=$(bash --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
-    echo -e "${GREEN}✅ Bash $bash_version detected${RESET}"
     
     # Check OpenSSL
     if ! command -v openssl >/dev/null 2>&1; then
         echo -e "${RED}Error: OpenSSL not found${RESET}"
-        echo -e "${YELLOW}Please install OpenSSL:${RESET}"
-        echo -e "  Ubuntu/Debian: ${BOLD}sudo apt install openssl${RESET}"
-        echo -e "  CentOS/RHEL:   ${BOLD}sudo yum install openssl${RESET}"
-        echo -e "  macOS:         ${BOLD}brew install openssl${RESET}"
-        exit 1
+        missing_pkg=1
+    else
+        ssl_version=$(openssl version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+        if [[ "$(echo "$ssl_version" | cut -d. -f1)" -eq 1 && "$(echo "$ssl_version" | cut -d. -f2)" -eq 0 ]]; then
+             echo -e "${YELLOW}⚠️ OpenSSL $ssl_version detected. Version 1.1.1+ recommended.${RESET}"
+        else
+             echo -e "${GREEN}✅ OpenSSL $ssl_version detected${RESET}"
+        fi
     fi
     
-    ssl_version=$(openssl version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-    echo -e "${GREEN}✅ OpenSSL $ssl_version detected${RESET}"
+    # Check Git (for testssl.sh)
+    if ! command -v git >/dev/null 2>&1; then
+        echo -e "${RED}Error: 'git' not found (required for audit tools)${RESET}"
+        missing_pkg=1
+    else
+        echo -e "${GREEN}✅ 'git' detected${RESET}"
+    fi
+    
+    # Check numfmt (coreutils)
+    if ! command -v numfmt >/dev/null 2>&1; then
+        echo -e "${RED}Error: 'numfmt' not found (part of coreutils)${RESET}"
+        missing_pkg=1
+    else
+        echo -e "${GREEN}✅ 'numfmt' detected${RESET}"
+    fi
+    
+    # Check less
+    if ! command -v less >/dev/null 2>&1; then
+        echo -e "${RED}Error: 'less' not found (for viewing logs)${RESET}"
+        missing_pkg=1
+    else
+        echo -e "${GREEN}✅ 'less' detected${RESET}"
+    fi
+    
+    if [[ $missing_pkg -ne 0 ]]; then
+        echo -e "${YELLOW}Please install missing packages:${RESET}"
+        echo -e "  Ubuntu/Debian: ${BOLD}sudo apt install openssl git coreutils less${RESET}"
+        echo -e "  CentOS/RHEL:   ${BOLD}sudo yum install openssl git coreutils less${RESET}"
+        echo -e "  macOS:         ${BOLD}brew install openssl git coreutils${RESET}"
+        exit 1
+    fi
     echo
 }
 
@@ -79,14 +112,14 @@ detect_shell() {
             elif [[ -f "$HOME/.bash_profile" ]]; then
                 config_file="$HOME/.bash_profile"
             else
-                config_file="$HOME/.bashrc"
+                config_file="$HOME/.bashrc" # Default
             fi
             ;;
         "fish")
             config_file="$HOME/.config/fish/config.fish"
             ;;
         *)
-            config_file="$HOME/.profile"
+            config_file="$HOME/.profile" # Fallback
             ;;
     esac
     
@@ -139,10 +172,10 @@ install_encryptor() {
         install_dir="/usr/local/bin"
         echo -e "${GREEN}Installing system-wide in $install_dir${RESET}"
     else
-        # Try system directory first
+        # Try system directory first if writable
         if [[ -w "/usr/local/bin" ]]; then
             install_dir="/usr/local/bin"
-            echo -e "${GREEN}Installing system-wide in $install_dir${RESET}"
+            echo -e "${GREEN}Installing system-wide in $install_dir (writable)${RESET}"
         else
             # Fall back to user directory
             install_dir="$HOME/.local/bin"
@@ -163,6 +196,8 @@ install_encryptor() {
         echo -e "${GREEN}✅ Installation successful!${RESET}"
     else
         echo -e "${RED}Installation failed${RESET}"
+        echo -e "${YELLOW}If installing to $HOME/.local/bin, no sudo is needed.${RESET}"
+        echo -e "${YELLOW}If installing to /usr/local/bin, you may need to re-run with 'sudo'${RESET}"
         exit 1
     fi
     
@@ -173,7 +208,7 @@ install_encryptor() {
 }
 
 configure_path() {
-    install_dir="$1"
+    local install_dir="$1"
     
     echo -e "${BLUE}Configuring PATH...${RESET}"
     
@@ -186,17 +221,15 @@ configure_path() {
     # Create config file if it doesn't exist
     if [[ ! -f "$config_file" ]]; then
         echo -e "${YELLOW}Creating config file: $config_file${RESET}"
-        
         # Create directory for fish config if needed
         if [[ "$user_shell" == "fish" ]]; then
             mkdir -p "$(dirname "$config_file")"
         fi
-        
         touch "$config_file"
     fi
     
     # Check if PATH export already exists
-    path_exists=false
+    local path_exists=false
     case "$user_shell" in
         "fish")
             if grep -q "set -gx PATH.*\.local/bin" "$config_file" 2>/dev/null; then
@@ -226,7 +259,7 @@ configure_path() {
         
         echo -e "${GREEN}✅ PATH configured in $config_file${RESET}"
     else
-        echo -e "${YELLOW}PATH already configured in $config_file${RESET}"
+        echo -e "${YELLOW}PATH configuration already exists in $config_file${RESET}"
     fi
     
     # Update current session PATH
@@ -234,49 +267,12 @@ configure_path() {
     echo -e "${GREEN}✅ PATH updated for current session${RESET}"
 }
 
-test_installation() {
-    echo -e "${BLUE}Testing installation...${RESET}"
-    
-    # Test if command is available
-    if command -v "$BINARY_NAME" >/dev/null 2>&1; then
-        echo -e "${GREEN}✅ Command '$BINARY_NAME' is available${RESET}"
-        
-        # Test version with timeout to avoid hanging
-        if timeout 10s "$BINARY_NAME" --version 2>/dev/null >/dev/null; then
-            echo -e "${GREEN}✅ Encryptor launches successfully${RESET}"
-        else
-            echo -e "${YELLOW}Command available but may need terminal restart${RESET}"
-        fi
-    else
-        echo -e "${YELLOW}Command '$BINARY_NAME' not immediately available${RESET}"
-        
-        # Try direct path
-        if [[ -f "$HOME/.local/bin/$BINARY_NAME" ]]; then
-            echo -e "${BLUE}Testing direct path...${RESET}"
-            if timeout 10s "$HOME/.local/bin/$BINARY_NAME" --version 2>/dev/null >/dev/null; then
-                echo -e "${GREEN}✅ Direct path works${RESET}"
-                echo -e "${YELLOW}You may need to restart your terminal or run: source $config_file${RESET}"
-            else
-                echo -e "${YELLOW}Direct path test inconclusive${RESET}"
-            fi
-        fi
-    fi
-}
-
-cleanup() {
-    if [[ -f "$SCRIPT_NAME" ]] && [[ "$1" == "downloaded" ]]; then
-        rm -f "$SCRIPT_NAME"
-        echo -e "${BLUE}Cleaned up temporary files${RESET}"
-    fi
-}
-
 print_success() {
     echo
-    echo -e "${GREEN}${BOLD}🎉 Installation Complete! 🎉${RESET}"
+    echo -e "${GREEN}${BOLD}Installation Complete!${RESET}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo
     
-    # Test final availability
     if command -v "$BINARY_NAME" >/dev/null 2>&1; then
         echo -e "${GREEN}✅ Encryptor is ready to use!${RESET}"
         echo -e "${BOLD}  encryptor${RESET}          # Launch interactive menu"
@@ -286,12 +282,6 @@ print_success() {
         echo -e "${BOLD}Restart your terminal${RESET} or run:"
         
         case "$user_shell" in
-            "zsh")
-                echo -e "${BOLD}  source ~/.zshrc${RESET}"
-                ;;
-            "bash")
-                echo -e "${BOLD}  source ~/.bashrc${RESET}"
-                ;;
             "fish")
                 echo -e "${BOLD}  exec fish${RESET}"
                 ;;
@@ -305,12 +295,6 @@ print_success() {
         echo -e "${BOLD}  ~/.local/bin/encryptor${RESET}"
     fi
     
-    echo
-    echo -e "${BLUE}Features:${RESET}"
-    echo -e "  • Multiple encryption algorithms (AES-256, RSA, Hybrid)"
-    echo -e "  • User-friendly interface"
-    echo -e "  • Built-in help and documentation"
-    echo -e "  • Secure key management"
     echo
     echo -e "${GREEN}Thank you for installing Encryptor!${RESET}"
     echo
@@ -326,13 +310,15 @@ main() {
     if [[ ! -f "$SCRIPT_NAME" ]]; then
         download_script
         downloaded=true
+    else
+        echo -e "${GREEN}Using local $SCRIPT_NAME for installation...${RESET}"
     fi
     
     install_encryptor
-    test_installation
     
     if [[ "$downloaded" == true ]]; then
-        cleanup "downloaded"
+        rm -f "$SCRIPT_NAME"
+        echo -e "${BLUE}Cleaned up temporary files${RESET}"
     fi
     
     print_success
@@ -347,14 +333,6 @@ case "${1:-}" in
         echo "Options:"
         echo "  --help, -h     Show this help message"
         echo "  --version, -v  Show version information"
-        echo
-        echo "This script will:"
-        echo "  1. Check system requirements (Bash, OpenSSL)"
-        echo "  2. Detect your shell configuration"
-        echo "  3. Download Encryptor (if not present locally)"
-        echo "  4. Install to appropriate directory"
-        echo "  5. Configure PATH for your shell"
-        echo "  6. Test the installation"
         exit 0
         ;;
     --version|-v)
