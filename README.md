@@ -10,9 +10,9 @@
 [![Version](https://img.shields.io/badge/Version-2.0.0-brightgreen.svg)](https://github.com/mpgamer75/encryptor/releases)
 [![Downloads](https://img.shields.io/github/downloads/mpgamer75/encryptor/total)](https://github.com/mpgamer75/encryptor/releases)
 
-**Advanced file encryption tool with modern AEAD algorithms and comprehensive certificate management**
+**Professional file encryption tool with modern symmetric algorithms and comprehensive certificate management**
 
-*Built with pure Bash and OpenSSL for maximum security and compatibility*
+*Built with pure Bash and OpenSSL 3.x for maximum security and compatibility*
 
 </div>
 
@@ -41,24 +41,27 @@
 
 ## Overview
 
-Encryptor is a modern, user-friendly command-line encryption tool designed for secure file protection. It leverages state-of-the-art AEAD (Authenticated Encryption with Associated Data) algorithms and provides comprehensive X.509 certificate management capabilities.
+Encryptor is a professional, user-friendly command-line encryption tool designed for secure file protection. It provides multiple modern symmetric encryption algorithms (AES, ChaCha20, Camellia, ARIA) with PBKDF2 key derivation, comprehensive X.509 certificate management, and S/MIME support for asymmetric encryption.
 
-The tool features an intuitive interactive interface with color-coded menus, built-in security auditing, and support for both symmetric and asymmetric encryption methods.
+The tool features an intuitive interactive interface with color-coded menus, built-in security auditing, secure file deletion options, and detailed operation reporting.
 
 ## Features
 
 ### Core Encryption
-- **Modern AEAD Ciphers**: AES-256-GCM and ChaCha20-Poly1305 for authenticated encryption
+- **Multiple Modern Algorithms**: AES-256-CBC/CTR, ChaCha20, Camellia-256-CBC, ARIA-256-CBC
 - **S/MIME Support**: Certificate-based asymmetric encryption for secure communications
-- **PBKDF2 Key Derivation**: 100,000 iterations with SHA-256 for password-based encryption
+- **PBKDF2 Key Derivation**: 100,000 iterations with SHA-256 for strong password-based encryption
 - **Automatic Salt Generation**: Unique salt for each encryption operation
+- **Secure File Deletion**: Optional 3-pass overwrite (shred) for original files after encryption
 
 ### Certificate Management
-- **Root CA Creation**: Generate self-signed Certificate Authority certificates
+- **Root CA Creation**: Generate self-signed Certificate Authority certificates with customizable details
 - **CSR Generation**: Create Certificate Signing Requests with private keys
 - **Certificate Signing**: Sign CSRs with your CA
-- **Certificate Inspection**: View and analyze certificate details
-- **Secure Key Storage**: Automatic permission management (400/600)
+- **Certificate Inspection**: Detailed certificate analysis with validity, key strength, and expiration checks
+- **PKCS#12 Export**: Export certificates for Windows, browsers, and email clients
+- **Certificate Validation**: Verify certificate/key pair matching
+- **Secure Key Storage**: Automatic permission management (400/600) with explicit location display
 
 ### Security Features
 - **Security Audit**: Local system security checks
@@ -68,12 +71,14 @@ The tool features an intuitive interactive interface with color-coded menus, bui
 - **Comprehensive Logging**: Track all encryption operations
 
 ### User Experience
-- **Interactive Interface**: Color-coded menus with ASCII art headers
-- **File Browser**: Visual file listing with icons and sizes
-- **Smart File Selection**: Numbered menu or direct filename input
+- **Interactive Interface**: Color-coded menus with clear navigation
+- **File Browser**: Visual file listing with sizes and permissions
+- **Smart Selection**: Numbered menu or direct filename/path input
 - **Automatic Naming**: Prevent file overwrites with timestamp suffixes
-- **Real-time Reports**: Detailed encryption/decryption operation reports
-- **Operation Timing**: Millisecond-precision performance metrics
+- **Detailed Reports**: Comprehensive encryption/decryption reports with instructions
+- **Secure Deletion Options**: Prompted file deletion after encryption/decryption
+- **Key Location Display**: Explicit certificate storage path for S/MIME operations
+- **Contextual Help**: Algorithm-specific troubleshooting in error messages
 
 ## Installation
 
@@ -152,11 +157,15 @@ q. Quit
 1. Select option **2** from the main menu
 2. Choose a file (by number or filename)
 3. Select an encryption algorithm:
-   - **AES-256-GCM**: Fast, hardware-accelerated (Recommended)
-   - **ChaCha20-Poly1305**: Excellent performance, no hardware dependency
+   - **AES-256-CBC**: Industry standard, highly secure (Recommended)
+   - **AES-256-CTR**: Counter mode, ideal for large files
+   - **ChaCha20**: Modern stream cipher, excellent performance
+   - **Camellia-256-CBC**: Japanese standard, AES equivalent
+   - **ARIA-256-CBC**: Korean standard, modern cipher
    - **S/MIME**: Certificate-based asymmetric encryption
-4. Provide password or certificate as required
-5. Review the encryption report
+4. Provide password or select certificate
+5. Review the encryption report with decryption instructions
+6. Optionally delete the original file securely
 
 ### Decrypting a File
 
@@ -165,6 +174,7 @@ q. Quit
 3. Select the same algorithm used for encryption
 4. Provide the correct password or private key/certificate
 5. Review the decryption report
+6. Optionally delete the encrypted file after successful decryption
 
 ### File Naming Convention
 
@@ -174,46 +184,86 @@ q. Quit
 
 ## Encryption Algorithms
 
-### AES-256-GCM (Recommended)
+### AES-256-CBC (Recommended)
 
-- **Type**: Symmetric AEAD (Authenticated Encryption with Associated Data)
+- **Type**: Symmetric block cipher with CBC mode
 - **Key Size**: 256 bits
-- **Security**: Military-grade, NSA Suite B compliant
+- **Standard**: NIST FIPS 197, industry standard
 - **Performance**: Excellent with hardware acceleration (AES-NI)
-- **Use Case**: General-purpose file encryption
+- **Use Case**: General-purpose file encryption, maximum compatibility
 
 **Technical Details**:
-- Mode: Galois/Counter Mode (GCM) provides both confidentiality and authenticity
+- Mode: Cipher Block Chaining (CBC) with initialization vector
 - Key Derivation: PBKDF2 with 100,000 iterations
-- Salt: Random 64-bit salt per operation
-- Authentication Tag: 128-bit for integrity verification
+- Salt: Random salt per operation
+- Security: Proven since 2001, widely adopted
 
-### ChaCha20-Poly1305
+### AES-256-CTR
 
-- **Type**: Symmetric AEAD stream cipher
+- **Type**: Symmetric block cipher with Counter mode
 - **Key Size**: 256 bits
-- **Security**: Modern, cryptanalysis-resistant
-- **Performance**: Excellent on all platforms, no hardware dependency
-- **Use Case**: Systems without AES hardware acceleration
+- **Standard**: NIST SP 800-38A
+- **Performance**: Parallelizable, excellent for large files
+- **Use Case**: Large files, backups, disk encryption
 
 **Technical Details**:
-- Cipher: ChaCha20 stream cipher
-- MAC: Poly1305 for authentication
-- Key Derivation: PBKDF2 with 100,000 iterations
-- Design: Constant-time implementation resistant to side-channel attacks
+- Mode: Counter (CTR) enables parallel processing
+- No padding required
+- Random access to encrypted data
+- Ideal for multi-core systems
+
+### ChaCha20
+
+- **Type**: Modern stream cipher
+- **Key Size**: 256 bits
+- **Standard**: RFC 7539
+- **Performance**: Excellent on all platforms, constant-time
+- **Use Case**: Mobile devices, ARM processors, maximum security
+
+**Technical Details**:
+- Created by Daniel J. Bernstein (DJB)
+- Resistant to timing attacks
+- No hardware dependency
+- Used by Google, CloudFlare, Signal
+
+### Camellia-256-CBC
+
+- **Type**: Symmetric block cipher
+- **Key Size**: 256 bits
+- **Standard**: ISO/IEC 18033-3, Japanese standard (NTT)
+- **Performance**: Comparable to AES
+- **Use Case**: International compliance, AES alternative
+
+**Technical Details**:
+- Security equivalent to AES-256
+- Approved by NESSIE (European evaluation)
+- Used in TLS and IPsec
+
+### ARIA-256-CBC
+
+- **Type**: Symmetric block cipher
+- **Key Size**: 256 bits
+- **Standard**: Korean standard (NSRI), RFC 5794
+- **Performance**: Modern and efficient
+- **Use Case**: Korean regulatory compliance, AES alternative
+
+**Technical Details**:
+- Similar structure to AES
+- Used in TLS (RFC 6209)
+- Government-approved cipher
 
 ### S/MIME (Certificate-based)
 
 - **Type**: Asymmetric encryption using X.509 certificates
-- **Cipher**: AES-256-GCM for actual file encryption
+- **Cipher**: AES-256-GCM for file encryption
 - **Key Exchange**: RSA public key cryptography
-- **Use Case**: Secure communications, email encryption, recipient-specific encryption
+- **Use Case**: Secure communications, recipient-specific encryption
 
 **Technical Details**:
 - File encrypted with symmetric AES-256-GCM
-- AES key encrypted with recipient's RSA public key
-- Supports certificate chains and trust hierarchies
-- Decryption requires private key + certificate
+- AES key encrypted with recipient's public key
+- Supports certificate chains
+- Keys stored in: ~/.config/encryptor/certs/
 
 ## Certificate Management
 
@@ -273,6 +323,13 @@ All certificates and keys are stored in:
 ```
 ~/.config/encryptor/certs/
 ```
+
+**Important**: This location is explicitly displayed in:
+- Encryption reports (for S/MIME operations)
+- Decryption error messages
+- Certificate management operations
+
+The tool ensures you always know where your private keys are stored for security and backup purposes.
 
 ## Security Audit
 
@@ -392,29 +449,36 @@ rm -rf ~/.config/encryptor
 - **Minimum Length**: 12+ characters recommended
 - **Complexity**: Use uppercase, lowercase, numbers, symbols
 - **Uniqueness**: Different password for each sensitive file
-- **Storage**: Never store passwords in plain text
+- **Storage**: Passwords are never stored; you must remember them
+- **Recovery**: Without the password, encrypted files cannot be recovered
 
 ### Key Management
 
 - **Private Keys**: Stored with 400 permissions (owner read-only)
-- **Backup Strategy**: Keep secure offline backups
+- **Location**: All keys in ~/.config/encryptor/certs/ (explicitly shown in UI)
+- **Backup Strategy**: Keep secure offline backups of certificate directory
 - **Access Control**: Limit access to certificate directory
-- **Rotation**: Periodically rotate certificates and keys
+- **Validation**: Use built-in certificate/key pair validation tool
+- **Expiration**: Check certificate expiration with built-in tool
 
 ### Algorithm Selection
 
-- **Default Recommendation**: AES-256-GCM
-- **For Shared Computers**: ChaCha20-Poly1305 (constant-time)
+- **Default Recommendation**: AES-256-CBC (maximum compatibility)
+- **For Large Files**: AES-256-CTR (parallelizable)
+- **For Mobile/ARM**: ChaCha20 (constant-time, excellent performance)
+- **For Shared Computers**: ChaCha20 (resistant to timing attacks)
 - **For Recipient-Specific**: S/MIME with certificates
-- **Hardware Acceleration**: AES-256-GCM benefits from AES-NI
+- **Hardware Acceleration**: AES-256-CBC/CTR benefit from AES-NI
 
 ### Best Practices
 
 1. **Verify Decryption**: Always test decryption before deleting originals
-2. **Secure Deletion**: Use `shred` or similar for sensitive plaintext files
-3. **Regular Audits**: Run security audit periodically
-4. **Update OpenSSL**: Keep OpenSSL updated for security patches
-5. **Certificate Validation**: Verify certificate authenticity before use
+2. **Secure Deletion**: Tool offers optional 3-pass overwrite (shred) after encryption
+3. **Password Management**: Use a password manager; passwords cannot be recovered
+4. **Regular Audits**: Run built-in security audit periodically
+5. **Update OpenSSL**: Keep OpenSSL updated for security patches
+6. **Certificate Validation**: Use built-in validation and expiration check tools
+7. **Backup Keys**: Backup ~/.config/encryptor/certs/ directory securely
 
 ### Known Limitations
 

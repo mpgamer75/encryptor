@@ -256,7 +256,11 @@ select_file_interactive() {
 # type: sym (symmetric, password), smime (asymmetric, certificate)
 declare -A ALGORITHMS
 ALGORITHMS=(
-    ["AES-256-CBC"]="aes-256-cbc:sym:Industry standard symmetric encryption with PBKDF2 key derivation (Recommended)"
+    ["AES-256-CBC"]="aes-256-cbc:sym:Industry standard (NIST), CBC mode with IV, highly secure (Recommended)"
+    ["AES-256-CTR"]="aes-256-ctr:sym:AES Counter mode, parallel processing, no padding needed"
+    ["ChaCha20"]="chacha20:sym:Modern stream cipher, constant-time, excellent performance"
+    ["Camellia-256-CBC"]="camellia-256-cbc:sym:Japanese standard (NTT), equivalent security to AES"
+    ["ARIA-256-CBC"]="aria-256-cbc:sym:Korean standard (NSRI), modern block cipher"
     ["S/MIME (Certificate)"]="smime:smime:Asymmetric encryption - encrypts for a specific recipient using their public certificate"
 )
 
@@ -355,14 +359,44 @@ show_encryption_report() {
     echo -e " 2. Select the algorithm: ${BOLD}$algo${RESET}"
     
     case "$algo" in
-        aes-256-gcm|chacha20-poly1305)
+        aes-256-cbc|aes-256-ctr|chacha20|camellia-256-cbc|aria-256-cbc)
             echo -e " 3. Provide the exact ${BOLD}password${RESET} used for encryption."
+            echo -e "\n${ORANGE}${BOLD}Important:${RESET} ${BOLD}Remember your password!${RESET} Without it, the file ${BOLD}cannot${RESET} be recovered."
             ;;
         smime)
             echo -e " 3. Provide the recipient's ${BOLD}private key${RESET} and ${BOLD}certificate${RESET}."
             echo -e "    ${DIM}(Certificate used for encryption: $key_info)${RESET}"
+            echo -e "\n${ORANGE}${BOLD}Important:${RESET} The private key is stored in: ${BOLD}$CERT_DIR${RESET}"
             ;;
     esac
+    
+    # Option to delete source file
+    echo -e "\n${CYAN}${BOLD}═══════════════════════════════════════════════════${RESET}"
+    echo -e "${YELLOW}${BOLD}Security Option:${RESET} Delete Original File?"
+    echo -e "${DIM}The encrypted file ($output_file) is now secure.${RESET}"
+    echo -e "${DIM}Do you want to securely delete the original unencrypted file?${RESET}"
+    echo -e "${DIM}${BOLD}Warning:${RESET} This action cannot be undone!${RESET}\n"
+    
+    echo -en "${MAGENTA}${BOLD}Delete original file? [y/N]: ${RESET}"
+    read -r delete_choice
+    delete_choice=$(echo "$delete_choice" | tr '[:upper:]' '[:lower:]' | xargs)
+    
+    if [[ "$delete_choice" == "y" || "$delete_choice" == "yes" ]]; then
+        echo -e "\n${CYAN}Securely deleting original file...${RESET}"
+        # Overwrite with random data before deletion (secure delete)
+        if command -v shred &> /dev/null; then
+            shred -vfz -n 3 "$input_file" 2>/dev/null && rm -f "$input_file"
+            echo -e "${GREEN}✓ File securely deleted (3-pass overwrite + removal)${RESET}"
+        else
+            # Fallback: simple overwrite then delete
+            dd if=/dev/urandom of="$input_file" bs=1 count=$(stat -c%s "$input_file" 2>/dev/null || stat -f%z "$input_file") conv=notrunc 2>/dev/null
+            rm -f "$input_file"
+            echo -e "${GREEN}✓ File deleted (overwritten with random data)${RESET}"
+        fi
+        log_operation "INFO" "Original file deleted: $input_file"
+    else
+        echo -e "${CYAN}Original file kept: $input_file${RESET}"
+    fi
     
     press_enter_to_continue
 }
@@ -396,15 +430,46 @@ show_decryption_report() {
         echo -e "${WHITE}${BOLD}Mode:${RESET}                (Integrated AEAD)"
         echo -e "${WHITE}${BOLD}Operation Time:${RESET}      ${duration_ms} ms"
         
+        echo -e "\n${GREEN}${BOLD}✓ File successfully decrypted!${RESET}"
+        echo -e "${DIM}Your original file content has been restored to: $output_file${RESET}"
+        
+        # Option to delete encrypted file
+        echo -e "\n${CYAN}${BOLD}═══════════════════════════════════════════════════${RESET}"
+        echo -e "${YELLOW}${BOLD}Security Option:${RESET} Delete Encrypted File?"
+        echo -e "${DIM}You now have the decrypted file. Do you want to delete the encrypted version?${RESET}\n"
+        
+        echo -en "${MAGENTA}${BOLD}Delete encrypted file? [y/N]: ${RESET}"
+        read -r delete_choice
+        delete_choice=$(echo "$delete_choice" | tr '[:upper:]' '[:lower:]' | xargs)
+        
+        if [[ "$delete_choice" == "y" || "$delete_choice" == "yes" ]]; then
+            rm -f "$input_file"
+            echo -e "${GREEN}✓ Encrypted file deleted: $input_file${RESET}"
+            log_operation "INFO" "Encrypted file deleted: $input_file"
+        else
+            echo -e "${CYAN}Encrypted file kept: $input_file${RESET}"
+        fi
+        
     else
         echo -e "${RED}${BOLD}            --- OPERATION FAILED ---${RESET}"
         log_operation "ERROR" "Failed decryption of $input_file. Reason: $error_msg"
         echo -e "\n${RED}${BOLD}The operation failed.${RESET}"
         echo -e "${YELLOW}Probable Reason: ${BOLD}$error_msg${RESET}"
-        echo -e "\n${DIM}Please check the following:${RESET}"
-        echo -e "${DIM}- The password or key is correct.${RESET}"
-        echo -e "${DIM}- The algorithm ($algo) is correct.${RESET}"
-        echo -e "${DIM}- The file is not corrupted.${RESET}"
+        echo -e "\n${YELLOW}${BOLD}Troubleshooting:${RESET}"
+        
+        case "$algo" in
+            aes-256-cbc|aes-256-ctr|chacha20|camellia-256-cbc|aria-256-cbc)
+                echo -e " - ${BOLD}Password:${RESET} Make sure you're using the exact same password"
+                echo -e " - ${BOLD}Algorithm:${RESET} Verify ${BOLD}$algo${RESET} is correct"
+                echo -e " - ${BOLD}File integrity:${RESET} The encrypted file may be corrupted"
+                ;;
+            smime)
+                echo -e " - ${BOLD}Private Key:${RESET} Must match the certificate used for encryption"
+                echo -e " - ${BOLD}Certificate:${RESET} Must be the recipient's certificate"
+                echo -e " - ${BOLD}Key Location:${RESET} Keys are stored in ${BOLD}$CERT_DIR${RESET}"
+                echo -e " - ${BOLD}File integrity:${RESET} The encrypted file may be corrupted"
+                ;;
+        esac
     fi
 
     press_enter_to_continue
@@ -442,7 +507,7 @@ process_encryption() {
     
     # Handle encryption by type
     case "$algo" in
-        aes-256-cbc)
+        aes-256-cbc|aes-256-ctr|chacha20|camellia-256-cbc|aria-256-cbc)
             local password
             echo -en "${MAGENTA}${BOLD}Enter encryption password: ${RESET}"
             read -rs password
@@ -580,7 +645,7 @@ process_decryption() {
     start_time=$(date +%s%N)
     
     case "$algo" in
-        aes-256-cbc)
+        aes-256-cbc|aes-256-ctr|chacha20|camellia-256-cbc|aria-256-cbc)
             local password
             echo -en "${MAGENTA}${BOLD}Enter decryption password: ${RESET}"
             read -rs password
