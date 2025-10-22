@@ -1,12 +1,18 @@
 encryptor (2.0.0-1) unstable; urgency=medium
-  * Major release with modern AEAD algorithms
-  * Added AES-256-GCM and ChaCha20-Poly1305 support
+  * Major release with modern cryptographic algorithms
+  * Added AES-256-CBC, AES-256-CTR, ChaCha20, Camellia-256, ARIA-256
   * Implemented S/MIME certificate-based encryption
-  * Complete X.509 certificate management system
-  * Integrated security audit tools (local + testssl.sh)
-  * Enhanced UI with color-coded menus and ASCII art
+  * Complete X.509 PKI management (CA, CSR, signing, inspection)
+  * PKCS#12 export for Windows/browsers/email clients
+  * Certificate/key pair validation and expiration monitoring
+  * PBKDF2 key derivation with 100,000 iterations
+  * Secure file deletion with 3-pass shred option
+  * Integrated security audit tools (local system & remote SSL/TLS)
+  * Enhanced UI with SLANT ASCII art and expanded color palette
+  * Robust input handling and contextual error messages
   * Performance monitoring with millisecond precision
   * Comprehensive logging system
   * Interactive file selection and browsing
+  * Automatic OS detection and OpenSSL capability checks
   
- -- mpgamer75 <mpgamer75@github.com>  Thu, 21 Oct 2025 00:00:00 +0000
+ -- mpgamer75 <mpgamer75@github.com>  Wed, 22 Oct 2025 12:00:00 +0000

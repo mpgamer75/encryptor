@@ -1,5 +1,5 @@
-.\" Man file for Encryptor v2.1.0
-.TH ENCRYPTOR 1 "2025-10-21" "2.1.0" "Encryptor User Manual"
+.\" Man file for Encryptor v2.0.0
+.TH ENCRYPTOR 1 "2024-10-21" "2.0.0" "Encryptor User Manual"
 
 .SH NAME
 encryptor \- Advanced command-line file encryption tool
@@ -11,7 +11,7 @@ encryptor \- Advanced command-line file encryption tool
 .SH DESCRIPTION
 .B encryptor
 is an interactive Bash-based tool for file encryption, decryption, and certificate management via a secure Text User Interface (TUI).
-It uses \fBopenssl(1)\fR for all cryptographic operations and aims to simplify complex security procedures by enforcing modern standards.
+It uses \fBopenssl(1)\fR for all cryptographic operations and aims to simplify complex security procedures by enforcing modern encryption standards.
 
 The tool runs in interactive mode if launched without arguments.
 
@@ -28,20 +28,22 @@ The main menu provides access to all modules:
 
 .TP
 .B [1] List Files
-Displays the current directory's contents with a simplified interface, separating directories and files and showing human-readable sizes.
+Displays the current directory's contents with a simplified interface, separating directories and files and showing human-readable sizes with icons.
 
 .TP
 .B [2] Encrypt a File
 Starts the encryption wizard. It guides the user through:
 .RS
 .IP "1." 4
-Selecting a file (via a numbered selector).
+Selecting a file (via a numbered selector or direct path input).
 .IP "2." 4
-Choosing a modern algorithm (AES-GCM, ChaCha20-Poly1305, S/MIME).
+Choosing a modern algorithm (AES-256-CBC/CTR, ChaCha20, Camellia-256, ARIA-256, S/MIME).
 .IP "3." 4
-Providing the key (password or recipient certificate).
+Providing the key (password for symmetric encryption or recipient certificate for S/MIME).
 .IP "4." 4
 Generates an encryption report detailing the operation and decryption instructions.
+.IP "5." 4
+Optional secure deletion of original file with 3-pass overwrite.
 .RE
 
 .TP
@@ -53,38 +55,50 @@ The file to decrypt.
 .IP "2." 4
 The algorithm used during encryption.
 .IP "3." 4
-The corresponding key (password or private key file).
+The corresponding key (password for symmetric, or private key + certificate for S/MIME).
 .IP "4." 4
 Generates a \fI.dec\fR file and an operation report.
+.IP "5." 4
+Optional deletion of encrypted file after successful decryption.
 .RE
 
 .TP
-.B [4] Certificate Manager (X.509)
-Opens the PKI and S/MIME certificate management module:
+.B [4] Certificate Manager (X.509 / S/MIME)
+Opens the comprehensive PKI and certificate management module:
 .RS
 .IP "•" 4
-Create a self-signed Root Certificate Authority (CA).
+Create a self-signed Root Certificate Authority (CA) with 4096-bit RSA keys.
 .IP "•" 4
-Generate an RSA private key and a Certificate Signing Request (CSR).
+Generate an RSA private key (2048-bit) and a Certificate Signing Request (CSR).
 .IP "•" 4
-Sign a CSR with the Root CA to issue a new certificate.
+Sign a CSR with the Root CA to issue a valid certificate (365-day validity).
 .IP "•" 4
-Inspect the contents of a certificate or CSR.
+Inspect the contents of a certificate or CSR with detailed information.
+.IP "•" 4
+List all managed certificates and keys with permission status.
+.IP "•" 4
+Export to PKCS#12 format (.p12/.pfx) for Windows, browsers, and email clients.
+.IP "•" 4
+Validate certificate/key pair matching with modulus comparison.
+.IP "•" 4
+Check certificate expiration status and days remaining.
 .RE
 
 .TP
 .B [5] Security Audit
-Performs security checks via a submenu:
+Performs comprehensive security checks via a submenu:
 .RS
 .IP "•" 4
-\fBLocal System Audit:\fR Checks OpenSSL version and private key permissions in the config directory.
+\fBLocal System Audit:\fR Checks OpenSSL version and capabilities (CMS, AEAD support), private key permissions in the config directory, certificate expiration status, config directory permissions, temporary files cleanup, and Bash version. Provides a security score with actionable recommendations.
 .IP "•" 4
-\fBtestssl.sh:\fR Provides an interface to install and run the \fBtestssl.sh\fR tool for scanning remote server TLS/SSL configurations.
+\fBCertificate Security Analysis:\fR Analyzes local certificates for validity, key strength (RSA bit length), signature algorithm security (SHA-256/384/512 vs deprecated SHA-1/MD5), certificate type (self-signed vs CA-signed), and fingerprints.
+.IP "•" 4
+\fBRemote SSL/TLS Scanner:\fR Provides an interface to install and run external security scanning tools for testing remote server TLS/SSL configurations.
 .RE
 
 .TP
 .B [h] Help
-Displays a simple help message.
+Displays a simple help message and refers to the man page.
 
 .TP
 .B [l] View Logs
@@ -92,55 +106,94 @@ Opens the log file \fI$HOME/.config/encryptor/encryptor.log\fR using \fBless(1)\
 
 .SH SUPPORTED ALGORITHMS
 .B encryptor
-v2.0+ intentionally restricts its algorithm selection to modern, secure ciphers that provide Authenticated Encryption with Associated Data (AEAD). This prevents the use of weak or deprecated modes like CBC or ECB.
+v2.0 supports modern symmetric encryption algorithms and certificate-based asymmetric encryption:
 
 .TP
 .B Symmetric (Password-based)
 .RS
 .IP "•" 4
-\fBAES-256-GCM (Recommended)\fR: The industry standard for authenticated symmetric encryption. Requires OpenSSL 1.1.1 or newer.
+\fBAES-256-CBC (Recommended)\fR: Industry standard, highly secure, CBC mode with IV, PBKDF2 key derivation with 100,000 iterations.
 .IP "•" 4
-\fBChaCha20-Poly1305\fR: A modern, high-performance alternative to AES, widely used in TLS 1.3.
+\fBAES-256-CTR\fR: AES Counter mode, enables parallel processing, no padding needed, ideal for large files.
+.IP "•" 4
+\fBChaCha20\fR: Modern stream cipher by Daniel J. Bernstein, constant-time operation, excellent performance on all platforms, no hardware dependency.
+.IP "•" 4
+\fBCamellia-256-CBC\fR: Japanese standard (NTT), equivalent security to AES, ISO/IEC 18033-3 approved.
+.IP "•" 4
+\fBARIA-256-CBC\fR: Korean standard (NSRI), RFC 5794, modern block cipher similar to AES.
 .RE
 
 .TP
 .B Asymmetric (Certificate-based)
 .RS
 .IP "•" 4
-\fBS/MIME\fR: Encrypts a file for a recipient using their X.509 public certificate. This is the standard for secure email and document exchange. Uses AES-256-GCM internally.
+\fBS/MIME\fR: Encrypts a file for a specific recipient using their X.509 public certificate. Only the recipient (with their matching private key) can decrypt it. Uses AES-256-GCM internally for file encryption, with the AES key encrypted using RSA public key cryptography. This is the standard for secure email and document exchange.
 .RE
 
 .SH FILES
 .TP
 \fI$HOME/.config/encryptor/encryptor.log\fR
-Main log file for operations and errors.
+Main log file for operations, errors, and security events. Includes timestamps and log levels (INFO, SUCCESS, ERROR).
 .TP
 \fI$HOME/.config/encryptor/certs/\fR
-Default directory for keys, CSRs, and certificates generated by the manager.
+Default directory for keys (.key), certificates (.pem), CSRs (.csr), and PKCS#12 files (.p12) generated by the certificate manager. Private keys are automatically secured with 400 permissions.
 .TP
 \fI$HOME/.config/encryptor/tools/testssl.sh/\fR
-Default installation path for the \fBtestssl.sh\fR audit tool.
+Installation directory for external security audit tools.
 .TP
 \fI/tmp/encryptor_$$\fR
-Temporary directory for operations, cleaned on exit.
+Temporary directory for operations, automatically cleaned on exit via trap.
 
 .SH SECURITY
 .B Encryptor
 is a frontend for \fBopenssl(1)\fR. The security of encrypted files depends entirely on the strength of the user's password or the secure management of their private keys.
 
 .B NEVER
-share your private keys (.key). Permissions for these files should be set to 400 (read-only for user). The audit tool (option [5]) can help verify this.
+share your private keys (.key). Permissions for these files should be set to 400 (read-only for user). The built-in security audit tool (option [5]) can verify this automatically.
 
-AEAD ciphers (GCM, Poly1305) provide integrity and authenticity checks, meaning the tool can detect if a file has been tampered with or if the wrong password was used.
+All symmetric algorithms use PBKDF2 key derivation with 100,000 iterations and SHA-256 for strong password-based encryption with unique random salts per operation.
 
-For S/MIME encryption, the recipient will need *their* matching private key and certificate to decrypt the file.
+For S/MIME encryption, the recipient will need *their* matching private key and certificate to decrypt the file. Keys are stored in \fI$HOME/.config/encryptor/certs/\fR with explicit location display in all operations.
+
+.B Secure File Deletion:
+When deleting original files after encryption (or encrypted files after decryption), the tool offers a 3-pass overwrite using \fBshred(1)\fR if available, or a single-pass random overwrite as fallback, before file removal.
+
+.SH EXAMPLES
+.TP
+.B Encrypt a file with AES-256-CBC:
+Launch encryptor, select option [2], choose your file, select algorithm [1] AES-256-CBC, provide a strong password. The tool creates filename.enc and offers to securely delete the original.
+
+.TP
+.B Decrypt a file:
+Launch encryptor, select option [3], choose the .enc file, select the same algorithm used for encryption, provide the correct password.
+
+.TP
+.B Create a Root CA:
+Launch encryptor, select option [4] Certificate Manager, then option [1] to create a self-signed Root Certificate Authority with customizable subject information.
+
+.TP
+.B Encrypt for a specific recipient (S/MIME):
+Select option [2] to encrypt, choose your file, select algorithm [6] S/MIME, provide the recipient's public certificate (.pem). Only they can decrypt with their private key.
+
+.TP
+.B Run security audit:
+Select option [5] Security Audit, then option [1] for local system audit to check OpenSSL version, key permissions, certificate expiration, and overall security score.
 
 .SH AUTHOR
 Written by mpgamer75.
-v2.1 refactor and documentation by Gemini.
+
+.SH REPORTING BUGS
+Report bugs to: https://github.com/mpgamer75/encryptor/issues
+
+.SH COPYRIGHT
+Copyright (c) 2024 Charles. License MIT.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
 
 .SH SEE ALSO
 .BR openssl(1),
 .BR chmod(1),
-.BR man(1),
-.BR git(1)
+.BR shred(1),
+.BR bash(1)
+
+Full documentation available at: https://github.com/mpgamer75/encryptor
