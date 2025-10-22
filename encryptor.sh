@@ -92,7 +92,7 @@ print_header() {
 EOF
     echo -e "${RESET}"
     echo -e "${CYAN}${BOLD}                   Advanced Encryption Tool v$VERSION${RESET}"
-    echo -e "${DIM}                        Config: $CONFIG_DIR${RESET}"
+    echo -e "${DIM}                          by mpgamer75${RESET}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════════${RESET}"
 }
 
@@ -252,16 +252,17 @@ select_file_interactive() {
 
 # ---  Algorithm Selection ---
 
-# Structure: "UI Name:openssl_cipher:type:description"
+# Structure: "UI Name|openssl_cipher|type|description"
 # type: sym (symmetric, password), smime (asymmetric, certificate)
+# Using | as delimiter to avoid conflicts with colons in descriptions
 declare -A ALGORITHMS
 ALGORITHMS=(
-    ["AES-256-CBC"]="aes-256-cbc:sym:Industry standard (NIST), CBC mode with IV, highly secure (Recommended)"
-    ["AES-256-CTR"]="aes-256-ctr:sym:AES Counter mode, parallel processing, no padding needed"
-    ["ChaCha20"]="chacha20:sym:Modern stream cipher, constant-time, excellent performance"
-    ["Camellia-256-CBC"]="camellia-256-cbc:sym:Japanese standard (NTT), equivalent security to AES"
-    ["ARIA-256-CBC"]="aria-256-cbc:sym:Korean standard (NSRI), modern block cipher"
-    ["S/MIME (Certificate)"]="smime:smime:Asymmetric encryption - encrypts for a specific recipient using their public certificate"
+    ["AES-256-CBC"]="aes-256-cbc|sym|Industry standard (NIST), CBC mode with IV, highly secure (Recommended)"
+    ["AES-256-CTR"]="aes-256-ctr|sym|AES Counter mode, parallel processing, no padding needed"
+    ["ChaCha20"]="chacha20|sym|Modern stream cipher, constant-time, excellent performance"
+    ["Camellia-256-CBC"]="camellia-256-cbc|sym|Japanese standard (NTT), equivalent security to AES"
+    ["ARIA-256-CBC"]="aria-256-cbc|sym|Korean standard (NSRI), modern block cipher"
+    ["S/MIME (Certificate)"]="smime|smime|Asymmetric encryption - encrypts for a specific recipient using their public certificate"
 )
 
 select_algorithm_menu() {
@@ -279,8 +280,8 @@ select_algorithm_menu() {
 
     for key in "${sorted_keys[@]}"; do
         local value="${ALGORITHMS[$key]}"
-        local type=$(echo "$value" | cut -d: -f3)
-        local desc=$(echo "$value" | cut -d: -f4)
+        local type=$(echo "$value" | cut -d'|' -f2)
+        local desc=$(echo "$value" | cut -d'|' -f3)
         
         local type_label="(Symmetric, Password-based)"
         if [[ "$type" == "smime" ]]; then
@@ -306,8 +307,8 @@ select_algorithm_menu() {
             return 1
         elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#options[@]} ]]; then
             local selected_key="${options[$((choice-1))]}"
-            # Return the openssl "key" (e.g., aes-256-gcm)
-            echo "${ALGORITHMS[$selected_key]}" | cut -d: -f1
+            # Return the openssl cipher name (first field)
+            echo "${ALGORITHMS[$selected_key]}" | cut -d'|' -f1
             return 0
         else
             echo -e "${RED}Invalid choice. Try again.${RESET}" >&2
@@ -345,8 +346,18 @@ show_encryption_report() {
     
     echo -e "\n${WHITE}${BOLD}Source File:${RESET}       $input_file"
     echo -e "${WHITE}${BOLD}Encrypted File:${RESET}    ${GREEN}$output_file${RESET}"
-    echo -e "${WHITE}${BOLD}Source Size:${RESET}        $(numfmt --to=iec --suffix=B "$(stat -c%s "$input_file" 2>/dev/null || stat -f%z "$input_file")")"
-    echo -e "${WHITE}${BOLD}Encrypted Size:${RESET}    $(numfmt --to=iec --suffix=B "$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file")")"
+    
+    # Get file sizes with proper error handling
+    local source_size=$(stat -c%s "$input_file" 2>/dev/null || stat -f%z "$input_file" 2>/dev/null || echo "0")
+    local encrypted_size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo "0")
+    
+    if command -v numfmt &>/dev/null && [[ "$source_size" =~ ^[0-9]+$ ]] && [[ "$encrypted_size" =~ ^[0-9]+$ ]]; then
+        echo -e "${WHITE}${BOLD}Source Size:${RESET}        $(numfmt --to=iec --suffix=B "$source_size" 2>/dev/null || echo "${source_size}B")"
+        echo -e "${WHITE}${BOLD}Encrypted Size:${RESET}    $(numfmt --to=iec --suffix=B "$encrypted_size" 2>/dev/null || echo "${encrypted_size}B")"
+    else
+        echo -e "${WHITE}${BOLD}Source Size:${RESET}        ${source_size}B"
+        echo -e "${WHITE}${BOLD}Encrypted Size:${RESET}    ${encrypted_size}B"
+    fi
     
     echo -e "\n${CYAN}---------- Encryption Parameters ----------${RESET}"
     echo -e "${WHITE}${BOLD}Algorithm:${RESET}           $algo"
@@ -422,8 +433,18 @@ show_decryption_report() {
         log_operation "SUCCESS" "Decryption of $input_file to $output_file"
         echo -e "\n${WHITE}${BOLD}Encrypted File:${RESET}    $input_file"
         echo -e "${WHITE}${BOLD}Decrypted File:${RESET}    ${GREEN}$output_file${RESET}"
-        echo -e "${WHITE}${BOLD}Encrypted Size:${RESET}    $(numfmt --to=iec --suffix=B "$(stat -c%s "$input_file" 2>/dev/null || stat -f%z "$input_file")")"
-        echo -e "${WHITE}${BOLD}Decrypted Size:${RESET}    $(numfmt --to=iec --suffix=B "$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file")")"
+        
+        # Get file sizes with proper error handling
+        local encrypted_size=$(stat -c%s "$input_file" 2>/dev/null || stat -f%z "$input_file" 2>/dev/null || echo "0")
+        local decrypted_size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo "0")
+        
+        if command -v numfmt &>/dev/null && [[ "$encrypted_size" =~ ^[0-9]+$ ]] && [[ "$decrypted_size" =~ ^[0-9]+$ ]]; then
+            echo -e "${WHITE}${BOLD}Encrypted Size:${RESET}    $(numfmt --to=iec --suffix=B "$encrypted_size" 2>/dev/null || echo "${encrypted_size}B")"
+            echo -e "${WHITE}${BOLD}Decrypted Size:${RESET}    $(numfmt --to=iec --suffix=B "$decrypted_size" 2>/dev/null || echo "${decrypted_size}B")"
+        else
+            echo -e "${WHITE}${BOLD}Encrypted Size:${RESET}    ${encrypted_size}B"
+            echo -e "${WHITE}${BOLD}Decrypted Size:${RESET}    ${decrypted_size}B"
+        fi
         
         echo -e "\n${CYAN}---------- Parameters Used ----------${RESET}"
         echo -e "${WHITE}${BOLD}Algorithm:${RESET}           $algo"
