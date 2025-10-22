@@ -1739,11 +1739,11 @@ security_audit_menu() {
 main_menu() {
     while true; do
         print_header
-        echo -e "  ${YELLOW}${BOLD}[1]${RESET} ${WHITE}List Files${RESET} ${DIM}(Simple ls)${RESET}"
+        echo -e "  ${YELLOW}${BOLD}[1]${RESET} ${WHITE}List Files${RESET}"
         echo -e "  ${YELLOW}${BOLD}[2]${RESET} ${GREEN}Encrypt a File${RESET}"
         echo -e "  ${YELLOW}${BOLD}[3]${RESET} ${RED}Decrypt a File${RESET}"
         echo -e "\n  ${BLUE}${BOLD}[4]${RESET} ${WHITE}Certificate Manager${RESET} ${DIM}(X.509 / S/MIME)${RESET}"
-        echo -e "  ${BLUE}${BOLD}[5]${RESET} ${WHITE}Security Audit${RESET} ${DIM}(Local & testssl.sh)${RESET}"
+        echo -e "  ${BLUE}${BOLD}[5]${RESET} ${WHITE}Security Audit${RESET} ${DIM}(Local & Remote)${RESET}"
         echo -e "\n  ${CYAN}${BOLD}[h]${RESET} ${WHITE}Help${RESET}"
         echo -e "  ${CYAN}${BOLD}[l]${RESET} ${WHITE}View Logs${RESET}"
         echo -e "  ${CYAN}${BOLD}[q]${RESET} ${WHITE}Quit${RESET}"
