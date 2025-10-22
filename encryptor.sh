@@ -257,8 +257,7 @@ select_file_interactive() {
 declare -A ALGORITHMS
 ALGORITHMS=(
     ["AES-256-CBC"]="aes-256-cbc:sym:Industry standard symmetric encryption with PBKDF2 key derivation (Recommended)"
-    ["ChaCha20-Poly1305"]="chacha20-poly1305:sym:Modern stream cipher, constant-time, resistant to side-channel attacks"
-    ["S/MIME (Certificate)"]="smime:smime:Certificate-based asymmetric encryption using recipient's public key"
+    ["S/MIME (Certificate)"]="smime:smime:Asymmetric encryption - encrypts for a specific recipient using their public certificate"
 )
 
 select_algorithm_menu() {
@@ -443,7 +442,7 @@ process_encryption() {
     
     # Handle encryption by type
     case "$algo" in
-        aes-256-cbc|chacha20-poly1305)
+        aes-256-cbc)
             local password
             echo -en "${MAGENTA}${BOLD}Enter encryption password: ${RESET}"
             read -rs password
@@ -469,35 +468,65 @@ process_encryption() {
             ;;
             
         "smime")
-            echo -e "\n${CYAN}${BOLD}S/MIME Certificate-Based Encryption${RESET}"
-            echo -e "${DIM}You need the recipient's certificate (.pem or .crt file)${RESET}\n"
+            echo -e "\n${CYAN}${BOLD}═══════════════════════════════════════════════════${RESET}"
+            echo -e "${CYAN}${BOLD}      S/MIME Certificate-Based Encryption${RESET}"
+            echo -e "${CYAN}${BOLD}═══════════════════════════════════════════════════${RESET}\n"
             
-            # List available certificates
+            echo -e "${WHITE}${BOLD}How does S/MIME work?${RESET}"
+            echo -e "${DIM}1. You encrypt a file using the RECIPIENT's public certificate${RESET}"
+            echo -e "${DIM}2. Only the recipient (with their private key) can decrypt it${RESET}"
+            echo -e "${DIM}3. This is asymmetric encryption - no password needed${RESET}\n"
+            
+            echo -e "${ORANGE}${BOLD}Important:${RESET} You need the recipient's PUBLIC certificate (.pem or .crt)"
+            echo -e "${DIM}The recipient will need THEIR private key to decrypt the file${RESET}\n"
+            
+            # Build array of available certificates
+            local cert_list=()
             if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.pem 2>/dev/null)" ]]; then
-                echo -e "${BLUE}Available certificates in $CERT_DIR:${RESET}"
+                echo -e "${BLUE}${BOLD}Available certificates:${RESET}"
                 local cert_num=1
                 for cert in "$CERT_DIR"/*.pem; do
-                    [[ -f "$cert" ]] && echo -e "  ${YELLOW}[$cert_num]${RESET} $(basename "$cert")"
-                    ((cert_num++))
+                    if [[ -f "$cert" ]]; then
+                        cert_list+=("$cert")
+                        echo -e "  ${YELLOW}${BOLD}[$cert_num]${RESET} $(basename "$cert")"
+                        ((cert_num++))
+                    fi
                 done
-                echo -e "${DIM}Or type the full path to another certificate${RESET}"
+                echo -e "\n${DIM}→ Type a number to select, or enter the full path to another certificate${RESET}"
+            else
+                echo -e "${YELLOW}No certificates found in $CERT_DIR${RESET}"
+                echo -e "${DIM}You can create certificates in Certificate Manager (option 4)${RESET}\n"
             fi
             
-            echo -en "\n${MAGENTA}${BOLD}Path to recipient's certificate: ${RESET}"
-            read -r cert_file
-            cert_file=$(echo "$cert_file" | xargs)
+            echo -en "\n${MAGENTA}${BOLD}Recipient's certificate (number or path): ${RESET}"
+            read -r cert_input
+            cert_input=$(echo "$cert_input" | xargs)
+            
+            local cert_file=""
+            # Check if input is a number (array index)
+            if [[ "$cert_input" =~ ^[0-9]+$ ]] && [[ "$cert_input" -ge 1 ]] && [[ "$cert_input" -le ${#cert_list[@]} ]]; then
+                cert_file="${cert_list[$((cert_input-1))]}"
+                echo -e "${GREEN}Selected: $(basename "$cert_file")${RESET}"
+            else
+                # Treat as path
+                cert_file="$cert_input"
+                # If not absolute path and not found, try CERT_DIR
+                if [[ ! -f "$cert_file" ]] && [[ "$cert_file" != /* ]]; then
+                    cert_file="$CERT_DIR/$cert_input"
+                fi
+            fi
             
             if [[ ! -f "$cert_file" ]]; then
-                error_msg="Recipient certificate file not found: $cert_file"
+                error_msg="Recipient certificate file not found: $cert_input"
                 cmd_status=1
             else
                 # S/MIME using AES-256-GCM
-                echo -e "${CYAN}Encrypting with S/MIME...${RESET}"
+                echo -e "\n${CYAN}Encrypting with S/MIME (AES-256-GCM)...${RESET}"
                 openssl smime -encrypt -aes256-gcm -in "$file_to_encrypt" -out "$output_file" \
                     -outform PEM "$cert_file" 2> "$TEMP_DIR/openssl.err"
                 cmd_status=$?
                 [[ $cmd_status -ne 0 ]] && error_msg=$(cat "$TEMP_DIR/openssl.err")
-                key_info="$cert_file"
+                key_info="[Encrypted for: $(basename "$cert_file")]"
             fi
             ;;
             
@@ -551,7 +580,7 @@ process_decryption() {
     start_time=$(date +%s%N)
     
     case "$algo" in
-        aes-256-cbc|chacha20-poly1305)
+        aes-256-cbc)
             local password
             echo -en "${MAGENTA}${BOLD}Enter decryption password: ${RESET}"
             read -rs password
@@ -576,54 +605,102 @@ process_decryption() {
             ;;
             
         "smime")
-            echo -e "\n${CYAN}${BOLD}S/MIME Certificate-Based Decryption${RESET}"
-            echo -e "${DIM}You need YOUR private key and certificate${RESET}\n"
+            echo -e "\n${CYAN}${BOLD}═══════════════════════════════════════════════════${RESET}"
+            echo -e "${CYAN}${BOLD}      S/MIME Certificate-Based Decryption${RESET}"
+            echo -e "${CYAN}${BOLD}═══════════════════════════════════════════════════${RESET}\n"
             
-            # List available keys and certificates
+            echo -e "${WHITE}${BOLD}How does S/MIME decryption work?${RESET}"
+            echo -e "${DIM}1. The file was encrypted with YOUR public certificate${RESET}"
+            echo -e "${DIM}2. You need YOUR private key to decrypt it${RESET}"
+            echo -e "${DIM}3. You also need YOUR certificate for verification${RESET}\n"
+            
+            echo -e "${ORANGE}${BOLD}Important:${RESET} You need BOTH your private key (.key) and certificate (.pem)"
+            echo -e "${DIM}These were created together when you generated your certificate${RESET}\n"
+            
+            # Build arrays for keys and certificates
+            local key_list=()
+            local cert_list=()
+            
             if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.key 2>/dev/null)" ]]; then
-                echo -e "${BLUE}Available keys in $CERT_DIR:${RESET}"
+                echo -e "${BLUE}${BOLD}Available private keys:${RESET}"
+                local key_num=1
                 for key in "$CERT_DIR"/*.key; do
-                    [[ -f "$key" ]] && echo -e "  ${YELLOW}→${RESET} $(basename "$key")"
+                    if [[ -f "$key" ]]; then
+                        key_list+=("$key")
+                        echo -e "  ${YELLOW}${BOLD}[$key_num]${RESET} $(basename "$key")"
+                        ((key_num++))
+                    fi
                 done
                 echo
-                echo -e "${BLUE}Available certificates in $CERT_DIR:${RESET}"
+            fi
+            
+            if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.pem 2>/dev/null)" ]]; then
+                echo -e "${BLUE}${BOLD}Available certificates:${RESET}"
+                local cert_num=1
                 for cert in "$CERT_DIR"/*.pem; do
-                    [[ -f "$cert" ]] && echo -e "  ${YELLOW}→${RESET} $(basename "$cert")"
+                    if [[ -f "$cert" ]]; then
+                        cert_list+=("$cert")
+                        echo -e "  ${YELLOW}${BOLD}[$cert_num]${RESET} $(basename "$cert")"
+                        ((cert_num++))
+                    fi
                 done
-                echo -e "${DIM}You can type the filename or full path${RESET}"
+                echo
             fi
             
-            echo -en "\n${MAGENTA}${BOLD}Path to your private key (.key): ${RESET}"
-            read -r priv_key_file
-            priv_key_file=$(echo "$priv_key_file" | xargs)
-            
-            # Auto-complete path if just filename provided
-            if [[ ! -f "$priv_key_file" ]] && [[ -f "$CERT_DIR/$priv_key_file" ]]; then
-                priv_key_file="$CERT_DIR/$priv_key_file"
+            if [[ ${#key_list[@]} -eq 0 ]] || [[ ${#cert_list[@]} -eq 0 ]]; then
+                echo -e "${YELLOW}No keys/certificates found in $CERT_DIR${RESET}"
+                echo -e "${DIM}You can create them in Certificate Manager (option 4)${RESET}\n"
             fi
             
-            echo -en "${MAGENTA}${BOLD}Path to your certificate (.pem): ${RESET}"
-            read -r cert_file
-            cert_file=$(echo "$cert_file" | xargs)
+            echo -e "${DIM}→ Type a number to select, or enter the full path${RESET}\n"
             
-            # Auto-complete path if just filename provided
-            if [[ ! -f "$cert_file" ]] && [[ -f "$CERT_DIR/$cert_file" ]]; then
-                cert_file="$CERT_DIR/$cert_file"
+            # Select private key
+            echo -en "${MAGENTA}${BOLD}Your private key (number or path): ${RESET}"
+            read -r key_input
+            key_input=$(echo "$key_input" | xargs)
+            
+            local priv_key_file=""
+            if [[ "$key_input" =~ ^[0-9]+$ ]] && [[ "$key_input" -ge 1 ]] && [[ "$key_input" -le ${#key_list[@]} ]]; then
+                priv_key_file="${key_list[$((key_input-1))]}"
+                echo -e "${GREEN}Selected: $(basename "$priv_key_file")${RESET}"
+            else
+                priv_key_file="$key_input"
+                if [[ ! -f "$priv_key_file" ]] && [[ "$priv_key_file" != /* ]]; then
+                    priv_key_file="$CERT_DIR/$key_input"
+                fi
             fi
             
-            if [[ ! -f "$priv_key_file" ]] || [[ ! -f "$cert_file" ]]; then
-                error_msg="Private key or certificate file not found."
-                echo -e "${RED}Error: Could not find files${RESET}"
-                [[ ! -f "$priv_key_file" ]] && echo -e "${RED}  Private key: $priv_key_file${RESET}"
-                [[ ! -f "$cert_file" ]] && echo -e "${RED}  Certificate: $cert_file${RESET}"
+            # Select certificate
+            echo -en "${MAGENTA}${BOLD}Your certificate (number or path): ${RESET}"
+            read -r cert_input
+            cert_input=$(echo "$cert_input" | xargs)
+            
+            local cert_file=""
+            if [[ "$cert_input" =~ ^[0-9]+$ ]] && [[ "$cert_input" -ge 1 ]] && [[ "$cert_input" -le ${#cert_list[@]} ]]; then
+                cert_file="${cert_list[$((cert_input-1))]}"
+                echo -e "${GREEN}Selected: $(basename "$cert_file")${RESET}"
+            else
+                cert_file="$cert_input"
+                if [[ ! -f "$cert_file" ]] && [[ "$cert_file" != /* ]]; then
+                    cert_file="$CERT_DIR/$cert_input"
+                fi
+            fi
+            
+            if [[ ! -f "$priv_key_file" ]]; then
+                error_msg="Private key file not found: $key_input"
+                cmd_status=1
+            elif [[ ! -f "$cert_file" ]]; then
+                error_msg="Certificate file not found: $cert_input"
                 cmd_status=1
             else
-                echo -e "${CYAN}Decrypting with S/MIME...${RESET}"
+                echo -e "\n${CYAN}Decrypting with S/MIME...${RESET}"
                 openssl smime -decrypt -in "$file_to_decrypt" -out "$output_file" \
                     -inform PEM -recip "$cert_file" -inkey "$priv_key_file" 2> "$TEMP_DIR/openssl.err"
                 cmd_status=$?
                 [[ $cmd_status -ne 0 ]] && error_msg=$(cat "$TEMP_DIR/openssl.err")
-                if [[ -z "$error_msg" ]]; then error_msg="Incorrect key/certificate or corrupt file."; fi
+                if [[ $cmd_status -ne 0 ]] && [[ -z "$error_msg" ]]; then 
+                    error_msg="Incorrect key/certificate or corrupt file."
+                fi
             fi
             ;;
             
