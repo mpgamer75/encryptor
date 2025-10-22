@@ -36,9 +36,158 @@ EOF
     echo
 }
 
+detect_distro() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        OS_NAME="$ID"
+        OS_VERSION="$VERSION_ID"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        OS_NAME="macos"
+        OS_VERSION=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
+    else
+        OS_NAME="unknown"
+        OS_VERSION="unknown"
+    fi
+}
+
+check_openssl_capabilities() {
+    local ssl_version="$1"
+    local has_cms=0
+    local has_aead=0
+    
+    # Test CMS support
+    if openssl cms -help 2>&1 | grep -q "encrypt" 2>/dev/null; then
+        has_cms=1
+    fi
+    
+    # Test AEAD support (check if ciphers command lists AEAD ciphers)
+    if openssl enc -ciphers 2>/dev/null | grep -q "aes-256-gcm\|chacha20-poly1305" 2>/dev/null; then
+        has_aead=1
+    fi
+    
+    echo "$has_cms:$has_aead"
+}
+
+suggest_openssl_upgrade() {
+    local ssl_version="$1"
+    
+    echo
+    echo -e "${YELLOW}${BOLD}⚠️  OpenSSL Upgrade Recommended${RESET}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo
+    echo -e "${BLUE}Current version:${RESET} OpenSSL $ssl_version"
+    echo -e "${BLUE}Recommended:${RESET}     OpenSSL 1.1.1+ or 3.x"
+    echo
+    echo -e "${CYAN}${BOLD}Why upgrade?${RESET}"
+    echo -e "  ${GREEN}✓${RESET} Modern AEAD ciphers (AES-256-GCM, ChaCha20-Poly1305)"
+    echo -e "  ${GREEN}✓${RESET} Enhanced security features"
+    echo -e "  ${GREEN}✓${RESET} Better performance with hardware acceleration"
+    echo -e "  ${GREEN}✓${RESET} Full CMS (Cryptographic Message Syntax) support"
+    echo
+    echo -e "${CYAN}${BOLD}Without upgrade:${RESET}"
+    echo -e "  ${YELLOW}→${RESET} Encryptor will use AES-256-CBC (still very secure)"
+    echo -e "  ${YELLOW}→${RESET} Some modern encryption modes unavailable"
+    echo
+    
+    case "$OS_NAME" in
+        ubuntu|debian)
+            local version_major="${OS_VERSION%%.*}"
+            echo -e "${CYAN}${BOLD}Upgrade instructions for Ubuntu/Debian:${RESET}"
+            
+            if [[ "$OS_NAME" == "ubuntu" ]] && [[ "$version_major" -ge 20 ]] || [[ "$OS_NAME" == "debian" ]] && [[ "$version_major" -ge 11 ]]; then
+                echo -e "${BOLD}sudo apt update${RESET}"
+                echo -e "${BOLD}sudo apt install --upgrade openssl libssl-dev${RESET}"
+            else
+                echo -e "${YELLOW}Your OS version may have older OpenSSL in repositories.${RESET}"
+                echo -e "${BOLD}sudo apt update${RESET}"
+                echo -e "${BOLD}sudo apt install --upgrade openssl${RESET}"
+                echo
+                echo -e "${DIM}Or compile from source:${RESET}"
+                echo -e "${BOLD}wget https://www.openssl.org/source/openssl-3.0.12.tar.gz${RESET}"
+                echo -e "${BOLD}tar -xzf openssl-3.0.12.tar.gz${RESET}"
+                echo -e "${BOLD}cd openssl-3.0.12${RESET}"
+                echo -e "${BOLD}./config --prefix=/usr/local/ssl --openssldir=/usr/local/ssl shared zlib${RESET}"
+                echo -e "${BOLD}make -j\$(nproc)${RESET}"
+                echo -e "${BOLD}sudo make install${RESET}"
+            fi
+            ;;
+        
+        centos|rhel|fedora|rocky|almalinux)
+            echo -e "${CYAN}${BOLD}Upgrade instructions for CentOS/RHEL/Fedora:${RESET}"
+            if [[ "$OS_NAME" == "fedora" ]]; then
+                echo -e "${BOLD}sudo dnf update openssl openssl-libs${RESET}"
+            else
+                local version_major="${OS_VERSION%%.*}"
+                if [[ "$version_major" -ge 8 ]]; then
+                    echo -e "${BOLD}sudo dnf update openssl openssl-libs${RESET}"
+                else
+                    echo -e "${BOLD}sudo yum update openssl openssl-libs${RESET}"
+                    echo
+                    echo -e "${YELLOW}Note: RHEL/CentOS 7 has OpenSSL 1.0.2 by default.${RESET}"
+                    echo -e "${YELLOW}Consider upgrading to RHEL/CentOS 8+ for modern OpenSSL.${RESET}"
+                fi
+            fi
+            ;;
+        
+        arch|manjaro)
+            echo -e "${CYAN}${BOLD}Upgrade instructions for Arch Linux:${RESET}"
+            echo -e "${BOLD}sudo pacman -Syu openssl${RESET}"
+            ;;
+        
+        opensuse*|sles)
+            echo -e "${CYAN}${BOLD}Upgrade instructions for openSUSE/SLES:${RESET}"
+            echo -e "${BOLD}sudo zypper update openssl libopenssl${RESET}"
+            ;;
+        
+        macos)
+            echo -e "${CYAN}${BOLD}Upgrade instructions for macOS:${RESET}"
+            if command -v brew >/dev/null 2>&1; then
+                echo -e "${BOLD}brew update${RESET}"
+                echo -e "${BOLD}brew install openssl@3${RESET}"
+                echo -e "${BOLD}brew link --force openssl@3${RESET}"
+                echo
+                echo -e "${YELLOW}Note: You may need to update your PATH:${RESET}"
+                echo -e "${BOLD}echo 'export PATH=\"/usr/local/opt/openssl@3/bin:\$PATH\"' >> ~/.zshrc${RESET}"
+                echo -e "${BOLD}source ~/.zshrc${RESET}"
+            else
+                echo -e "${YELLOW}Homebrew not found. Install it first:${RESET}"
+                echo -e "${BOLD}/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"${RESET}"
+            fi
+            ;;
+        
+        *)
+            echo -e "${CYAN}${BOLD}Generic upgrade instructions:${RESET}"
+            echo -e "${YELLOW}Use your distribution's package manager to upgrade OpenSSL${RESET}"
+            echo
+            echo -e "${DIM}Or compile from source:${RESET}"
+            echo -e "${BOLD}wget https://www.openssl.org/source/openssl-3.0.12.tar.gz${RESET}"
+            echo -e "${BOLD}tar -xzf openssl-3.0.12.tar.gz && cd openssl-3.0.12${RESET}"
+            echo -e "${BOLD}./config && make -j\$(nproc) && sudo make install${RESET}"
+            ;;
+    esac
+    
+    echo
+    echo -e "${CYAN}${BOLD}Continue installation anyway?${RESET}"
+    echo -e "${YELLOW}Encryptor will work with fallback to AES-256-CBC${RESET}"
+    echo -en "${BOLD}[Y/n]: ${RESET}"
+    read -r response
+    
+    if [[ "$response" =~ ^[Nn]$ ]]; then
+        echo -e "${BLUE}Installation cancelled. Upgrade OpenSSL and run installer again.${RESET}"
+        exit 0
+    fi
+    
+    echo -e "${GREEN}Continuing installation...${RESET}"
+    echo
+}
+
 check_requirements() {
     echo -e "${BLUE}Checking system requirements...${RESET}"
     local missing_pkg=0
+    
+    # Detect distribution
+    detect_distro
+    echo -e "${DIM}Detected OS: $OS_NAME $OS_VERSION${RESET}"
     
     # Check Bash
     if ! command -v bash >/dev/null 2>&1; then
@@ -49,48 +198,100 @@ check_requirements() {
         echo -e "${GREEN}✅ Bash $bash_version detected${RESET}"
     fi
     
-    # Check OpenSSL
+    # Check OpenSSL with detailed capabilities
     if ! command -v openssl >/dev/null 2>&1; then
-        echo -e "${RED}Error: OpenSSL not found${RESET}"
+        echo -e "${RED}❌ Error: OpenSSL not found${RESET}"
         missing_pkg=1
     else
         ssl_version=$(openssl version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-        if [[ "$(echo "$ssl_version" | cut -d. -f1)" -eq 1 && "$(echo "$ssl_version" | cut -d. -f2)" -eq 0 ]]; then
-             echo -e "${YELLOW}⚠️ OpenSSL $ssl_version detected. Version 1.1.1+ recommended.${RESET}"
+        local major=$(echo "$ssl_version" | cut -d. -f1)
+        local minor=$(echo "$ssl_version" | cut -d. -f2)
+        
+        # Check capabilities
+        local capabilities=$(check_openssl_capabilities "$ssl_version")
+        local has_cms=$(echo "$capabilities" | cut -d: -f1)
+        local has_aead=$(echo "$capabilities" | cut -d: -f2)
+        
+        echo -e "${GREEN}✅ OpenSSL $ssl_version detected${RESET}"
+        
+        # Display capabilities
+        if [[ "$has_cms" -eq 1 ]]; then
+            echo -e "   ${GREEN}✓${RESET} ${DIM}CMS (Cryptographic Message Syntax) supported${RESET}"
         else
-             echo -e "${GREEN}✅ OpenSSL $ssl_version detected${RESET}"
+            echo -e "   ${YELLOW}○${RESET} ${DIM}CMS not available${RESET}"
+        fi
+        
+        # Check version and suggest upgrade
+        local needs_upgrade=0
+        if [[ "$major" -lt 1 ]] || [[ "$major" -eq 1 && "$minor" -eq 0 ]]; then
+            needs_upgrade=1
+            echo -e "   ${YELLOW}⚠${RESET}  ${DIM}Modern AEAD ciphers not fully supported${RESET}"
+        elif [[ "$major" -eq 1 && "$minor" -eq 1 ]]; then
+            echo -e "   ${GREEN}✓${RESET} ${DIM}AEAD ciphers supported (OpenSSL 1.1.x)${RESET}"
+        else
+            echo -e "   ${GREEN}✓${RESET} ${DIM}Full modern cryptography support (OpenSSL $major.x)${RESET}"
+        fi
+        
+        # Suggest upgrade if old version
+        if [[ "$needs_upgrade" -eq 1 ]]; then
+            suggest_openssl_upgrade "$ssl_version"
         fi
     fi
     
     # Check Git (for testssl.sh)
     if ! command -v git >/dev/null 2>&1; then
-        echo -e "${RED}Error: 'git' not found (required for audit tools)${RESET}"
-        missing_pkg=1
+        echo -e "${YELLOW}⚠️  'git' not found (required for audit tools)${RESET}"
+        echo -e "${DIM}   Security audit features will be unavailable${RESET}"
     else
         echo -e "${GREEN}✅ 'git' detected${RESET}"
     fi
     
     # Check numfmt (coreutils)
     if ! command -v numfmt >/dev/null 2>&1; then
-        echo -e "${RED}Error: 'numfmt' not found (part of coreutils)${RESET}"
-        missing_pkg=1
+        echo -e "${YELLOW}⚠️  'numfmt' not found (part of coreutils)${RESET}"
+        echo -e "${DIM}   File size formatting will be basic${RESET}"
     else
         echo -e "${GREEN}✅ 'numfmt' detected${RESET}"
     fi
     
     # Check less
     if ! command -v less >/dev/null 2>&1; then
-        echo -e "${RED}Error: 'less' not found (for viewing logs)${RESET}"
-        missing_pkg=1
+        echo -e "${YELLOW}⚠️  'less' not found (for viewing logs)${RESET}"
+        echo -e "${DIM}   Log viewing with 'cat' fallback${RESET}"
     else
         echo -e "${GREEN}✅ 'less' detected${RESET}"
     fi
     
     if [[ $missing_pkg -ne 0 ]]; then
-        echo -e "${YELLOW}Please install missing packages:${RESET}"
-        echo -e "  Ubuntu/Debian: ${BOLD}sudo apt install openssl git coreutils less${RESET}"
-        echo -e "  CentOS/RHEL:   ${BOLD}sudo yum install openssl git coreutils less${RESET}"
-        echo -e "  macOS:         ${BOLD}brew install openssl git coreutils${RESET}"
+        echo
+        echo -e "${RED}${BOLD}Critical packages missing!${RESET}"
+        echo -e "${YELLOW}Please install required packages:${RESET}"
+        echo
+        case "$OS_NAME" in
+            ubuntu|debian)
+                echo -e "  ${BOLD}sudo apt update${RESET}"
+                echo -e "  ${BOLD}sudo apt install bash openssl git coreutils less${RESET}"
+                ;;
+            centos|rhel|fedora|rocky|almalinux)
+                if [[ "$OS_NAME" == "fedora" ]] || [[ "${OS_VERSION%%.*}" -ge 8 ]]; then
+                    echo -e "  ${BOLD}sudo dnf install bash openssl git coreutils less${RESET}"
+                else
+                    echo -e "  ${BOLD}sudo yum install bash openssl git coreutils less${RESET}"
+                fi
+                ;;
+            arch|manjaro)
+                echo -e "  ${BOLD}sudo pacman -S bash openssl git coreutils less${RESET}"
+                ;;
+            opensuse*|sles)
+                echo -e "  ${BOLD}sudo zypper install bash openssl git coreutils less${RESET}"
+                ;;
+            macos)
+                echo -e "  ${BOLD}brew install bash openssl git coreutils less${RESET}"
+                ;;
+            *)
+                echo -e "  ${BOLD}Use your package manager to install: bash openssl git coreutils less${RESET}"
+                ;;
+        esac
         exit 1
     fi
     echo

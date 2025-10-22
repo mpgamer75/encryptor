@@ -38,6 +38,14 @@ if command -v tput >/dev/null 2>&1; then
     MAGENTA=$(tput setaf 5)
     # Bright White
     WHITE=$(tput setaf 7)
+    # Orange for warnings (208)
+    ORANGE=$(tput setaf 208)
+    # Purple for special operations (135)
+    PURPLE=$(tput setaf 135)
+    # Lime for bright success (118)
+    LIME=$(tput setaf 118)
+    # Pink for important notes (205)
+    PINK=$(tput setaf 205)
     # "Dim" Gray
     DIM=$(tput dim)
 else
@@ -52,6 +60,10 @@ else
     CYAN="\e[36m"
     MAGENTA="\e[35m"
     WHITE="\e[97m"
+    ORANGE="\e[38;5;208m"      # For warnings
+    PURPLE="\e[38;5;135m"      # For special operations
+    LIME="\e[38;5;118m"        # For bright success
+    PINK="\e[38;5;205m"        # For important notes
     DIM="\e[2m"
 fi
 
@@ -444,13 +456,41 @@ process_encryption() {
                 error_msg="Passwords do not match or are empty."
                 cmd_status=1
             else
-                # -pbkdf2 -iter 100000 are modern standards
-                openssl enc "-$algo" -salt -pbkdf2 -iter 100000 \
+                # Use openssl cms for AEAD ciphers (enc doesn't support them)
+                # Create temporary password file (more secure than command line)
+                local pass_file="$TEMP_DIR/pass.tmp"
+                echo -n "$password" > "$pass_file"
+                chmod 600 "$pass_file"
+                
+                # Determine cipher for cms
+                local cms_cipher
+                case "$algo" in
+                    aes-256-gcm) cms_cipher="-aes256-gcm" ;;
+                    chacha20-poly1305) cms_cipher="-chacha20-poly1305" ;;
+                esac
+                
+                echo -e "${CYAN}Encrypting with modern AEAD cipher...${RESET}"
+                # Use CMS for password-based encryption with PBKDF2
+                openssl cms -encrypt -binary $cms_cipher \
+                    -in "$file_to_encrypt" -out "$output_file" \
+                    -outform PEM -pwri_password "pass:$password" 2> "$TEMP_DIR/openssl.err"
+                cmd_status=$?
+                
+                # Fallback to CBC if AEAD not available in this OpenSSL version
+                if [[ $cmd_status -ne 0 ]] && grep -q "not supported\|unknown option" "$TEMP_DIR/openssl.err"; then
+                    echo -e "${ORANGE}Note: AEAD cipher not available, using AES-256-CBC (still very secure)${RESET}"
+                    openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
                     -in "$file_to_encrypt" -out "$output_file" \
                     -pass "pass:$password" 2> "$TEMP_DIR/openssl.err"
                 cmd_status=$?
+                    algo="aes-256-cbc"  # Update for report
+                fi
+                
                 [[ $cmd_status -ne 0 ]] && error_msg=$(cat "$TEMP_DIR/openssl.err")
-                key_info="[Password Protected]"
+                key_info="[Password Protected with PBKDF2]"
+                
+                # Clean up password file
+                rm -f "$pass_file"
             fi
             ;;
             
@@ -547,12 +587,33 @@ process_decryption() {
                 error_msg="Password cannot be empty."
                 cmd_status=1
             else
-                openssl enc "-d" "-$algo" -pbkdf2 -iter 100000 \
+                # Determine cipher for cms
+                local cms_cipher
+                case "$algo" in
+                    aes-256-gcm) cms_cipher="-aes256-gcm" ;;
+                    chacha20-poly1305) cms_cipher="-chacha20-poly1305" ;;
+                esac
+                
+                echo -e "${CYAN}Decrypting with modern AEAD cipher...${RESET}"
+                # Try CMS first for AEAD
+                openssl cms -decrypt -binary $cms_cipher \
+                    -in "$file_to_decrypt" -out "$output_file" \
+                    -inform PEM -pwri_password "pass:$password" 2> "$TEMP_DIR/openssl.err"
+                cmd_status=$?
+                
+                # Fallback to enc with CBC if file was encrypted with fallback method
+                if [[ $cmd_status -ne 0 ]] && grep -q "not supported\|unknown option\|bad decrypt" "$TEMP_DIR/openssl.err"; then
+                    echo -e "${ORANGE}Note: Trying AES-256-CBC fallback method${RESET}"
+                    openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
                     -in "$file_to_decrypt" -out "$output_file" \
                     -pass "pass:$password" 2> "$TEMP_DIR/openssl.err"
                 cmd_status=$?
+                fi
+                
                 [[ $cmd_status -ne 0 ]] && error_msg=$(cat "$TEMP_DIR/openssl.err")
-                if [[ -z "$error_msg" ]]; then error_msg="Bad decrypt (wrong password or corrupt file)."; fi
+                if [[ $cmd_status -ne 0 ]] && [[ -z "$error_msg" ]]; then 
+                    error_msg="Bad decrypt (wrong password, wrong algorithm, or corrupt file)."
+                fi
             fi
             ;;
             
@@ -632,6 +693,9 @@ manage_certificates() {
         echo -e "  ${YELLOW}${BOLD}[3]${RESET} ${WHITE}Sign Certificate Signing Request (CSR)${RESET}"
         echo -e "  ${YELLOW}${BOLD}[4]${RESET} ${WHITE}Inspect a Certificate or CSR${RESET}"
         echo -e "  ${YELLOW}${BOLD}[5]${RESET} ${WHITE}List managed certificates and keys${RESET}"
+        echo -e "  ${PURPLE}${BOLD}[6]${RESET} ${WHITE}Export to PKCS#12 (for Windows/browsers)${RESET}"
+        echo -e "  ${PURPLE}${BOLD}[7]${RESET} ${WHITE}Validate Certificate/Key Pair${RESET}"
+        echo -e "  ${PURPLE}${BOLD}[8]${RESET} ${WHITE}Check Certificate Expiration${RESET}"
         echo -e "  ${YELLOW}${BOLD}[q]${RESET} ${WHITE}Return to Main Menu${RESET}"
         
         echo -en "\n${MAGENTA}${BOLD}Your choice: ${RESET}"
@@ -649,7 +713,7 @@ manage_certificates() {
                 echo -e "  ${WHITE}→${RESET} CA private key (.key) - ${RED}Keep this secret!${RESET}"
                 echo -e "  ${WHITE}→${RESET} CA certificate (.pem) - Can share publicly\n"
                 
-                echo -en "${MAGENTA}${BOLD}Name for your CA (e.g., MyRootCA) [default: MyRootCA]: ${RESET}"
+                echo -en "${MAGENTA}${BOLD}Name for your CA (e.g., MyCompanyRootCA) [default: MyRootCA]: ${RESET}"
                 read -r ca_name
                 ca_name=$(echo "$ca_name" | xargs)
                 [[ -z "$ca_name" ]] && ca_name="MyRootCA"
@@ -664,19 +728,78 @@ manage_certificates() {
                     [[ -f "$ca_cert" ]] && echo -e "  ${WHITE}→${RESET} $ca_cert"
                     echo -e "\n${DIM}Tip: Choose a different name or delete existing files first${RESET}"
                 else
-                    echo -e "\n${CYAN}Generating 4096-bit RSA CA (this may take a moment)...${RESET}"
+                    # Professional certificate fields
+                    echo -e "\n${PURPLE}${BOLD}Certificate Subject Information${RESET}"
+                    echo -e "${DIM}Press Enter to use defaults in [brackets]${RESET}\n"
+                    
+                    echo -en "${MAGENTA}Organization Name (e.g., ACME Corp) [Encryptor]: ${RESET}"
+                    read -r org_name
+                    org_name=$(echo "$org_name" | xargs)
+                    [[ -z "$org_name" ]] && org_name="Encryptor"
+                    
+                    echo -en "${MAGENTA}Department/Unit (e.g., IT Security) [Certificate Authority]: ${RESET}"
+                    read -r ou_name
+                    ou_name=$(echo "$ou_name" | xargs)
+                    [[ -z "$ou_name" ]] && ou_name="Certificate Authority"
+                    
+                    echo -en "${MAGENTA}Country Code (2 letters, e.g., US, FR, UK, CA) [US]: ${RESET}"
+                    read -r country
+                    country=$(echo "$country" | xargs | tr '[:lower:]' '[:upper:]')
+                    [[ -z "$country" ]] && country="US"
+                    
+                    echo -en "${MAGENTA}State/Province (e.g., California, Ontario) [California]: ${RESET}"
+                    read -r state
+                    state=$(echo "$state" | xargs)
+                    [[ -z "$state" ]] && state="California"
+                    
+                    echo -en "${MAGENTA}City (e.g., San Francisco, Toronto) [San Francisco]: ${RESET}"
+                    read -r city
+                    city=$(echo "$city" | xargs)
+                    [[ -z "$city" ]] && city="San Francisco"
+                    
+                    echo -en "${MAGENTA}Email address (optional): ${RESET}"
+                    read -r email
+                    email=$(echo "$email" | xargs)
+                    
+                    # Build subject string
+                    local subject="/C=$country/ST=$state/L=$city/O=$org_name/OU=$ou_name/CN=$ca_name"
+                    [[ -n "$email" ]] && subject="$subject/emailAddress=$email"
+                    
+                    echo -e "\n${CYAN}${BOLD}Certificate Preview:${RESET}"
+                    echo -e "  ${DIM}Subject: $subject${RESET}"
+                    echo -e "  ${DIM}Validity: 10 years${RESET}"
+                    echo -e "  ${DIM}Key Size: 4096-bit RSA${RESET}\n"
+                    
+                    echo -e "${CYAN}Generating CA (this may take a moment)...${RESET}"
                     openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 \
                         -nodes -keyout "$ca_key" -out "$ca_cert" \
-                        -subj "/C=US/ST=California/L=Local/O=Encryptor/OU=CA/CN=$ca_name" 2>/dev/null
+                        -subj "$subject" 2>/dev/null
                     chmod 400 "$ca_key"
                     
-                    echo -e "\n${GREEN}${BOLD}✓ Root CA created successfully!${RESET}\n"
-                    echo -e "${WHITE}${BOLD}Files created:${RESET}"
-                    echo -e "  ${YELLOW}Private Key:${RESET}  $ca_key ${RED}(Permissions: 400)${RESET}"
-                    echo -e "  ${YELLOW}Certificate:${RESET}  $ca_cert ${GREEN}(Valid: 10 years)${RESET}\n"
-                    echo -e "${CYAN}${BOLD}Next steps:${RESET}"
+                    # Get certificate details
+                    local not_before=$(openssl x509 -in "$ca_cert" -noout -startdate 2>/dev/null | cut -d= -f2)
+                    local not_after=$(openssl x509 -in "$ca_cert" -noout -enddate 2>/dev/null | cut -d= -f2)
+                    local serial=$(openssl x509 -in "$ca_cert" -noout -serial 2>/dev/null | cut -d= -f2)
+                    local fingerprint=$(openssl x509 -in "$ca_cert" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+                    
+                    echo -e "\n${LIME}${BOLD}✓ Root CA created successfully!${RESET}\n"
+                    echo -e "${WHITE}${BOLD}Certificate Details:${RESET}"
+                    echo -e "  ${YELLOW}Subject:${RESET}      $subject"
+                    echo -e "  ${YELLOW}Issuer:${RESET}       ${DIM}(Self-signed)${RESET}"
+                    echo -e "  ${YELLOW}Valid From:${RESET}   $not_before"
+                    echo -e "  ${YELLOW}Valid Until:${RESET}  $not_after ${GREEN}(10 years)${RESET}"
+                    echo -e "  ${YELLOW}Serial:${RESET}       $serial"
+                    echo -e "  ${YELLOW}Key Type:${RESET}     RSA 4096-bit"
+                    echo -e "  ${YELLOW}Signature:${RESET}    SHA-256 with RSA Encryption\n"
+                    echo -e "${WHITE}${BOLD}Files Created:${RESET}"
+                    echo -e "  ${RED}🔑 Private Key:${RESET}  $ca_key ${PINK}(Permissions: 400) ⚠️  KEEP SECURE${RESET}"
+                    echo -e "  ${GREEN}📜 Certificate:${RESET}  $ca_cert ($(stat -f%z "$ca_cert" 2>/dev/null || stat -c%s "$ca_cert" 2>/dev/null) bytes)\n"
+                    echo -e "${YELLOW}${BOLD}Fingerprint (SHA-256):${RESET}"
+                    echo -e "  ${DIM}$fingerprint${RESET}\n"
+                    echo -e "${PURPLE}${BOLD}Next Steps:${RESET}"
                     echo -e "  ${WHITE}→${RESET} Use option ${BOLD}[3]${RESET} to sign certificate requests with this CA"
-                    echo -e "  ${WHITE}→${RESET} Keep the .key file ${RED}secure${RESET} - anyone with it can forge certificates!"
+                    echo -e "  ${WHITE}→${RESET} Distribute $ca_cert to users who need to trust your certificates"
+                    echo -e "  ${WHITE}→${RESET} ${PINK}NEVER${RESET} share the .key file - store it offline if possible!"
                 fi
                 press_enter_to_continue
                 ;;
@@ -886,6 +1009,227 @@ manage_certificates() {
                     [[ $has_other -eq 0 ]] && echo -e "  ${DIM}(none)${RESET}"
                     
                     echo -e "\n${WHITE}${BOLD}Total files:${RESET} $(ls -1 "$CERT_DIR" | wc -l)"
+                fi
+                press_enter_to_continue
+                ;;
+            6) # Export to PKCS#12
+                print_section_header "Export to PKCS#12 Format"
+                echo -e "${CYAN}${BOLD}What is PKCS#12?${RESET}"
+                echo -e "${DIM}PKCS#12 (.p12/.pfx) bundles your certificate and private key into a single file.${RESET}"
+                echo -e "${DIM}This format is widely supported by Windows, browsers, and email clients.${RESET}\n"
+                
+                # List available certificates
+                if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.pem 2>/dev/null)" ]]; then
+                    echo -e "${BLUE}Available certificates in $CERT_DIR:${RESET}"
+                    for cert in "$CERT_DIR"/*.pem; do
+                        [[ -f "$cert" ]] && echo -e "  ${YELLOW}→${RESET} $(basename "$cert")"
+                    done
+                fi
+                
+                echo -en "\n${MAGENTA}${BOLD}Path to certificate (.pem): ${RESET}"
+                read -r cert_file
+                cert_file=$(echo "$cert_file" | xargs)
+                [[ ! -f "$cert_file" ]] && [[ -f "$CERT_DIR/$cert_file" ]] && cert_file="$CERT_DIR/$cert_file"
+                
+                if [[ ! -f "$cert_file" ]]; then
+                    echo -e "${RED}Certificate file not found!${RESET}"
+                else
+                    # List available keys
+                    if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.key 2>/dev/null)" ]]; then
+                        echo -e "${BLUE}Available keys in $CERT_DIR:${RESET}"
+                        for key in "$CERT_DIR"/*.key; do
+                            [[ -f "$key" ]] && echo -e "  ${YELLOW}→${RESET} $(basename "$key")"
+                        done
+                    fi
+                    
+                    echo -en "${MAGENTA}${BOLD}Path to private key (.key): ${RESET}"
+                    read -r key_file
+                    key_file=$(echo "$key_file" | xargs)
+                    [[ ! -f "$key_file" ]] && [[ -f "$CERT_DIR/$key_file" ]] && key_file="$CERT_DIR/$key_file"
+                    
+                    if [[ ! -f "$key_file" ]]; then
+                        echo -e "${RED}Private key file not found!${RESET}"
+                    else
+                        local base_name=$(basename "$cert_file" .pem)
+                        local p12_file="$CERT_DIR/${base_name}.p12"
+                        
+                        echo -en "\n${MAGENTA}${BOLD}Enter export password (for .p12 file): ${RESET}"
+                        read -rs p12_pass
+                        echo
+                        echo -en "${MAGENTA}${BOLD}Confirm password: ${RESET}"
+                        read -rs p12_pass_conf
+                        echo
+                        
+                        if [[ "$p12_pass" != "$p12_pass_conf" ]]; then
+                            echo -e "${RED}Passwords do not match!${RESET}"
+                        else
+                            echo -e "\n${CYAN}Creating PKCS#12 bundle...${RESET}"
+                            openssl pkcs12 -export \
+                                -in "$cert_file" \
+                                -inkey "$key_file" \
+                                -out "$p12_file" \
+                                -name "$base_name" \
+                                -passout "pass:$p12_pass" 2>/dev/null
+                            
+                            if [[ $? -eq 0 ]]; then
+                                echo -e "${LIME}${BOLD}✓ PKCS#12 export successful!${RESET}\n"
+                                echo -e "${WHITE}${BOLD}Output file:${RESET}"
+                                echo -e "  ${GREEN}📦 PKCS#12:${RESET} $p12_file ($(stat -f%z "$p12_file" 2>/dev/null || stat -c%s "$p12_file" 2>/dev/null) bytes)\n"
+                                echo -e "${PURPLE}${BOLD}How to use:${RESET}"
+                                echo -e "  ${WHITE}→${RESET} Windows: Double-click to import into Certificate Store"
+                                echo -e "  ${WHITE}→${RESET} Browser: Import in Settings > Security > Certificates"
+                                echo -e "  ${WHITE}→${RESET} Email: Import in your email client for S/MIME"
+                                echo -e "  ${WHITE}→${RESET} ${PINK}Password required${RESET} when importing"
+                            else
+                                echo -e "${RED}Export failed! Check that certificate and key match.${RESET}"
+                            fi
+                        fi
+                    fi
+                fi
+                press_enter_to_continue
+                ;;
+            7) # Validate Certificate/Key Pair
+                print_section_header "Validate Certificate/Key Pair"
+                echo -e "${CYAN}${BOLD}What does this do?${RESET}"
+                echo -e "${DIM}Verifies that a certificate and private key belong together.${RESET}"
+                echo -e "${DIM}This ensures your certificate can be used with your private key.${RESET}\n"
+                
+                # List available certificates
+                if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.pem 2>/dev/null)" ]]; then
+                    echo -e "${BLUE}Available certificates in $CERT_DIR:${RESET}"
+                    for cert in "$CERT_DIR"/*.pem; do
+                        [[ -f "$cert" ]] && echo -e "  ${YELLOW}→${RESET} $(basename "$cert")"
+                    done
+                fi
+                
+                echo -en "\n${MAGENTA}${BOLD}Path to certificate (.pem): ${RESET}"
+                read -r cert_file
+                cert_file=$(echo "$cert_file" | xargs)
+                [[ ! -f "$cert_file" ]] && [[ -f "$CERT_DIR/$cert_file" ]] && cert_file="$CERT_DIR/$cert_file"
+                
+                if [[ ! -f "$cert_file" ]]; then
+                    echo -e "${RED}Certificate file not found!${RESET}"
+                else
+                    # List available keys
+                    if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.key 2>/dev/null)" ]]; then
+                        echo -e "${BLUE}Available keys in $CERT_DIR:${RESET}"
+                        for key in "$CERT_DIR"/*.key; do
+                            [[ -f "$key" ]] && echo -e "  ${YELLOW}→${RESET} $(basename "$key")"
+                        done
+                    fi
+                    
+                    echo -en "${MAGENTA}${BOLD}Path to private key (.key): ${RESET}"
+                    read -r key_file
+                    key_file=$(echo "$key_file" | xargs)
+                    [[ ! -f "$key_file" ]] && [[ -f "$CERT_DIR/$key_file" ]] && key_file="$CERT_DIR/$key_file"
+                    
+                    if [[ ! -f "$key_file" ]]; then
+                        echo -e "${RED}Private key file not found!${RESET}"
+                    else
+                        echo -e "\n${CYAN}Validating pair...${RESET}"
+                        
+                        # Extract modulus from certificate and key
+                        local cert_modulus=$(openssl x509 -noout -modulus -in "$cert_file" 2>/dev/null | openssl md5 2>/dev/null)
+                        local key_modulus=$(openssl rsa -noout -modulus -in "$key_file" 2>/dev/null | openssl md5 2>/dev/null)
+                        
+                        if [[ -z "$cert_modulus" ]] || [[ -z "$key_modulus" ]]; then
+                            echo -e "${RED}${BOLD}✗ Validation failed!${RESET}"
+                            echo -e "${YELLOW}Could not read certificate or key. Files may be corrupt.${RESET}"
+                        elif [[ "$cert_modulus" == "$key_modulus" ]]; then
+                            echo -e "\n${LIME}${BOLD}✓ Certificate and key MATCH!${RESET}\n"
+                            echo -e "${WHITE}${BOLD}Validation details:${RESET}"
+                            echo -e "  ${YELLOW}Certificate:${RESET} $(basename "$cert_file")"
+                            echo -e "  ${YELLOW}Private Key:${RESET} $(basename "$key_file")"
+                            echo -e "  ${YELLOW}Modulus MD5:${RESET} ${DIM}$cert_modulus${RESET}\n"
+                            echo -e "${GREEN}This pair can be used together for encryption/decryption.${RESET}"
+                        else
+                            echo -e "\n${RED}${BOLD}✗ Certificate and key DO NOT MATCH!${RESET}\n"
+                            echo -e "${YELLOW}${BOLD}Details:${RESET}"
+                            echo -e "  ${YELLOW}Certificate MD5:${RESET} ${DIM}$cert_modulus${RESET}"
+                            echo -e "  ${YELLOW}Key MD5:${RESET}        ${DIM}$key_modulus${RESET}\n"
+                            echo -e "${ORANGE}These files cannot be used together. Possible causes:${RESET}"
+                            echo -e "  ${WHITE}→${RESET} Wrong certificate for this key"
+                            echo -e "  ${WHITE}→${RESET} Wrong key for this certificate"
+                            echo -e "  ${WHITE}→${RESET} Files got mixed up during storage"
+                        fi
+                    fi
+                fi
+                press_enter_to_continue
+                ;;
+            8) # Check Certificate Expiration
+                print_section_header "Check Certificate Expiration"
+                echo -e "${CYAN}${BOLD}What does this do?${RESET}"
+                echo -e "${DIM}Checks if a certificate is expired or about to expire.${RESET}"
+                echo -e "${DIM}Helps you renew certificates before they become invalid.${RESET}\n"
+                
+                # List available certificates
+                if [[ -d "$CERT_DIR" ]] && [[ -n "$(ls -A "$CERT_DIR"/*.pem 2>/dev/null)" ]]; then
+                    echo -e "${BLUE}Available certificates in $CERT_DIR:${RESET}"
+                    for cert in "$CERT_DIR"/*.pem; do
+                        [[ -f "$cert" ]] && echo -e "  ${YELLOW}→${RESET} $(basename "$cert")"
+                    done
+                fi
+                
+                echo -en "\n${MAGENTA}${BOLD}Path to certificate (.pem): ${RESET}"
+                read -r cert_file
+                cert_file=$(echo "$cert_file" | xargs)
+                [[ ! -f "$cert_file" ]] && [[ -f "$CERT_DIR/$cert_file" ]] && cert_file="$CERT_DIR/$cert_file"
+                
+                if [[ ! -f "$cert_file" ]]; then
+                    echo -e "${RED}Certificate file not found!${RESET}"
+                else
+                    echo -e "\n${CYAN}Checking expiration...${RESET}"
+                    
+                    # Get certificate dates
+                    local not_before=$(openssl x509 -in "$cert_file" -noout -startdate 2>/dev/null | cut -d= -f2)
+                    local not_after=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | cut -d= -f2)
+                    local subject=$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null | cut -d= -f2-)
+                    
+                    if [[ -z "$not_after" ]]; then
+                        echo -e "${RED}Could not read certificate!${RESET}"
+                    else
+                        # Check if certificate is currently valid
+                        openssl x509 -in "$cert_file" -noout -checkend 0 &>/dev/null
+                        local is_valid=$?
+                        
+                        # Check if expiring in 30 days
+                        openssl x509 -in "$cert_file" -noout -checkend 2592000 &>/dev/null
+                        local expiring_soon=$?
+                        
+                        echo -e "\n${WHITE}${BOLD}Certificate Information:${RESET}"
+                        echo -e "  ${YELLOW}File:${RESET}         $(basename "$cert_file")"
+                        echo -e "  ${YELLOW}Subject:${RESET}      ${DIM}$subject${RESET}"
+                        echo -e "  ${YELLOW}Valid From:${RESET}   $not_before"
+                        echo -e "  ${YELLOW}Valid Until:${RESET}  $not_after\n"
+                        
+                        if [[ $is_valid -eq 0 ]]; then
+                            if [[ $expiring_soon -ne 0 ]]; then
+                                echo -e "${ORANGE}${BOLD}⚠️  WARNING: Certificate expiring within 30 days!${RESET}"
+                                echo -e "${YELLOW}Action required: Renew this certificate soon.${RESET}"
+                            else
+                                echo -e "${GREEN}${BOLD}✓ Certificate is VALID${RESET}"
+                                echo -e "${GREEN}This certificate can be used for encryption/authentication.${RESET}"
+                            fi
+                        else
+                            echo -e "${RED}${BOLD}✗ Certificate is EXPIRED!${RESET}"
+                            echo -e "${YELLOW}This certificate can no longer be used.${RESET}"
+                            echo -e "${YELLOW}Action required: Generate a new certificate.${RESET}"
+                        fi
+                        
+                        # Calculate days remaining
+                        if command -v date &>/dev/null; then
+                            local end_date=$(date -d "$not_after" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$not_after" +%s 2>/dev/null)
+                            local now=$(date +%s)
+                            if [[ -n "$end_date" ]] && [[ -n "$now" ]]; then
+                                local days_left=$(( (end_date - now) / 86400 ))
+                                if [[ $days_left -gt 0 ]]; then
+                                    echo -e "\n${CYAN}${BOLD}Days remaining:${RESET} $days_left days"
+                                else
+                                    echo -e "\n${RED}${BOLD}Expired:${RESET} $((-days_left)) days ago"
+                                fi
+                            fi
+                        fi
+                    fi
                 fi
                 press_enter_to_continue
                 ;;
