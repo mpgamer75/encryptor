@@ -256,14 +256,14 @@ select_file_interactive() {
 # type: sym (symmetric, password), smime (asymmetric, certificate)
 declare -A ALGORITHMS
 ALGORITHMS=(
-    ["AES-256-GCM"]="aes-256-gcm:sym:AEAD standard. Fast, hardware-accelerated (Recommended)."
-    ["ChaCha20-Poly1305"]="chacha20-poly1305:sym:Modern AEAD standard. Excellent performance, no hardware bias."
-    ["S/MIME (Certificate)"]="smime:smime:Asymmetric (X.509). Encrypts for a recipient's certificate."
+    ["AES-256-CBC"]="aes-256-cbc:sym:Industry standard symmetric encryption with PBKDF2 key derivation (Recommended)"
+    ["ChaCha20-Poly1305"]="chacha20-poly1305:sym:Modern stream cipher, constant-time, resistant to side-channel attacks"
+    ["S/MIME (Certificate)"]="smime:smime:Certificate-based asymmetric encryption using recipient's public key"
 )
 
 select_algorithm_menu() {
     print_section_header "Select Encryption Algorithm" >&2
-    echo -e "${DIM}Only modern, secure AEAD (Authenticated Encryption) ciphers are listed.${RESET}" >&2
+    echo -e "${DIM}Only modern, secure encryption algorithms are listed.${RESET}" >&2
     
     local i=1
     local options=()
@@ -443,7 +443,7 @@ process_encryption() {
     
     # Handle encryption by type
     case "$algo" in
-        aes-256-gcm|chacha20-poly1305)
+        aes-256-cbc|chacha20-poly1305)
             local password
             echo -en "${MAGENTA}${BOLD}Enter encryption password: ${RESET}"
             read -rs password
@@ -456,41 +456,15 @@ process_encryption() {
                 error_msg="Passwords do not match or are empty."
                 cmd_status=1
             else
-                # Use openssl cms for AEAD ciphers (enc doesn't support them)
-                # Create temporary password file (more secure than command line)
-                local pass_file="$TEMP_DIR/pass.tmp"
-                echo -n "$password" > "$pass_file"
-                chmod 600 "$pass_file"
-                
-                # Determine cipher for cms
-                local cms_cipher
-                case "$algo" in
-                    aes-256-gcm) cms_cipher="-aes-256-gcm" ;;
-                    chacha20-poly1305) cms_cipher="-chacha20-poly1305" ;;
-                esac
-                
-                echo -e "${CYAN}Encrypting with modern AEAD cipher...${RESET}"
-                # Use CMS for password-based encryption with PBKDF2
-                openssl cms -encrypt -binary $cms_cipher \
-                    -in "$file_to_encrypt" -out "$output_file" \
-                    -outform PEM -pwri_password "pass:$password" 2> "$TEMP_DIR/openssl.err"
-                cmd_status=$?
-                
-                # Fallback to CBC if AEAD not available in this OpenSSL version
-                if [[ $cmd_status -ne 0 ]] && grep -q "not supported\|unknown option" "$TEMP_DIR/openssl.err"; then
-                    echo -e "${ORANGE}Note: AEAD cipher not available, using AES-256-CBC (still very secure)${RESET}"
-                    openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
+                echo -e "${CYAN}Encrypting with $algo cipher...${RESET}"
+                # Use openssl enc with PBKDF2 for strong key derivation
+                openssl enc "-$algo" -salt -pbkdf2 -iter 100000 \
                     -in "$file_to_encrypt" -out "$output_file" \
                     -pass "pass:$password" 2> "$TEMP_DIR/openssl.err"
                 cmd_status=$?
-                    algo="aes-256-cbc"  # Update for report
-                fi
                 
                 [[ $cmd_status -ne 0 ]] && error_msg=$(cat "$TEMP_DIR/openssl.err")
-                key_info="[Password Protected with PBKDF2]"
-                
-                # Clean up password file
-                rm -f "$pass_file"
+                key_info="[Password Protected with PBKDF2, 100K iterations]"
             fi
             ;;
             
@@ -577,7 +551,7 @@ process_decryption() {
     start_time=$(date +%s%N)
     
     case "$algo" in
-        aes-256-gcm|chacha20-poly1305)
+        aes-256-cbc|chacha20-poly1305)
             local password
             echo -en "${MAGENTA}${BOLD}Enter decryption password: ${RESET}"
             read -rs password
@@ -587,28 +561,12 @@ process_decryption() {
                 error_msg="Password cannot be empty."
                 cmd_status=1
             else
-                # Determine cipher for cms
-                local cms_cipher
-                case "$algo" in
-                    aes-256-gcm) cms_cipher="-aes-256-gcm" ;;
-                    chacha20-poly1305) cms_cipher="-chacha20-poly1305" ;;
-                esac
-                
-                echo -e "${CYAN}Decrypting with modern AEAD cipher...${RESET}"
-                # Try CMS first for AEAD
-                openssl cms -decrypt -binary $cms_cipher \
-                    -in "$file_to_decrypt" -out "$output_file" \
-                    -inform PEM -pwri_password "pass:$password" 2> "$TEMP_DIR/openssl.err"
-                cmd_status=$?
-                
-                # Fallback to enc with CBC if file was encrypted with fallback method
-                if [[ $cmd_status -ne 0 ]] && grep -q "not supported\|unknown option\|bad decrypt" "$TEMP_DIR/openssl.err"; then
-                    echo -e "${ORANGE}Note: Trying AES-256-CBC fallback method${RESET}"
-                    openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
+                echo -e "${CYAN}Decrypting with $algo cipher...${RESET}"
+                # Use openssl enc with PBKDF2
+                openssl enc -d "-$algo" -pbkdf2 -iter 100000 \
                     -in "$file_to_decrypt" -out "$output_file" \
                     -pass "pass:$password" 2> "$TEMP_DIR/openssl.err"
                 cmd_status=$?
-                fi
                 
                 [[ $cmd_status -ne 0 ]] && error_msg=$(cat "$TEMP_DIR/openssl.err")
                 if [[ $cmd_status -ne 0 ]] && [[ -z "$error_msg" ]]; then 
@@ -792,8 +750,8 @@ manage_certificates() {
                     echo -e "  ${YELLOW}Key Type:${RESET}     RSA 4096-bit"
                     echo -e "  ${YELLOW}Signature:${RESET}    SHA-256 with RSA Encryption\n"
                     echo -e "${WHITE}${BOLD}Files Created:${RESET}"
-                    echo -e "  ${RED}🔑 Private Key:${RESET}  $ca_key ${PINK}(Permissions: 400) ⚠️  KEEP SECURE${RESET}"
-                    echo -e "  ${GREEN}📜 Certificate:${RESET}  $ca_cert ($(stat -f%z "$ca_cert" 2>/dev/null || stat -c%s "$ca_cert" 2>/dev/null) bytes)\n"
+                    echo -e "  ${RED}[KEY]${RESET} Private Key:  $ca_key ${PINK}(Permissions: 400) KEEP SECURE!${RESET}"
+                    echo -e "  ${GREEN}[CERT]${RESET} Certificate: $ca_cert ($(stat -f%z "$ca_cert" 2>/dev/null || stat -c%s "$ca_cert" 2>/dev/null) bytes)\n"
                     echo -e "${YELLOW}${BOLD}Fingerprint (SHA-256):${RESET}"
                     echo -e "  ${DIM}$fingerprint${RESET}\n"
                     echo -e "${PURPLE}${BOLD}Next Steps:${RESET}"
@@ -1204,7 +1162,7 @@ manage_certificates() {
                         
                         if [[ $is_valid -eq 0 ]]; then
                             if [[ $expiring_soon -ne 0 ]]; then
-                                echo -e "${ORANGE}${BOLD}⚠️  WARNING: Certificate expiring within 30 days!${RESET}"
+                                echo -e "${ORANGE}${BOLD}[!] WARNING: Certificate expiring within 30 days!${RESET}"
                                 echo -e "${YELLOW}Action required: Renew this certificate soon.${RESET}"
                             else
                                 echo -e "${GREEN}${BOLD}✓ Certificate is VALID${RESET}"
@@ -1266,14 +1224,14 @@ install_testssl() {
 }
 
 run_testssl() {
-    print_section_header "Certificate Analysis with OpenSSL"
+    print_section_header "Certificate Security Analysis"
     echo -e "${CYAN}${BOLD}What does this do?${RESET}"
-    echo -e "${DIM}Analyzes local certificates for security issues, validity, and configuration.${RESET}"
-    echo -e "${DIM}Can also scan remote servers if you have testssl.sh installed.${RESET}\n"
+    echo -e "${DIM}Performs detailed security analysis of X.509 certificates.${RESET}"
+    echo -e "${DIM}Checks validity, key strength, algorithms, and potential vulnerabilities.${RESET}\n"
     
     echo -e "${PURPLE}${BOLD}Choose analysis type:${RESET}"
     echo -e "  ${YELLOW}${BOLD}[1]${RESET} ${WHITE}Analyze Local Certificate${RESET}"
-    echo -e "  ${YELLOW}${BOLD}[2]${RESET} ${WHITE}Scan Remote Server (requires testssl.sh)${RESET}"
+    echo -e "  ${YELLOW}${BOLD}[2]${RESET} ${WHITE}Scan Remote SSL/TLS Server${RESET} ${DIM}(requires external tool)${RESET}"
     echo -e "  ${YELLOW}${BOLD}[q]${RESET} ${WHITE}Back${RESET}"
     
     echo -en "\n${MAGENTA}${BOLD}Your choice: ${RESET}"
@@ -1336,12 +1294,12 @@ run_testssl() {
             if [[ $? -eq 0 ]]; then
                 openssl x509 -in "$cert_file" -noout -checkend 2592000 &>/dev/null
                 if [[ $? -eq 0 ]]; then
-                    echo -e "  ${LIME}✅ ${BOLD}Status:${RESET} Valid (not expiring soon)"
+                    echo -e "  ${LIME}[OK] ${BOLD}Status:${RESET} Valid (not expiring soon)"
                 else
-                    echo -e "  ${ORANGE}⚠️  ${BOLD}Status:${RESET} Valid but expiring within 30 days"
+                    echo -e "  ${ORANGE}[!] ${BOLD}Status:${RESET} Valid but expiring within 30 days"
                 fi
             else
-                echo -e "  ${RED}❌ ${BOLD}Status:${RESET} EXPIRED"
+                echo -e "  ${RED}[X] ${BOLD}Status:${RESET} EXPIRED"
             fi
             
             # 3. Key Strength
@@ -1354,13 +1312,13 @@ run_testssl() {
             
             if [[ "$key_type" == "rsaEncryption" ]]; then
                 if [[ "$key_size" -ge 4096 ]]; then
-                    echo -e "  ${LIME}✅ ${BOLD}Strength:${RESET} Excellent (4096+ bits)"
+                    echo -e "  ${LIME}[OK] ${BOLD}Strength:${RESET} Excellent (4096+ bits)"
                 elif [[ "$key_size" -ge 2048 ]]; then
-                    echo -e "  ${GREEN}✅ ${BOLD}Strength:${RESET} Good (2048+ bits)"
+                    echo -e "  ${GREEN}[OK] ${BOLD}Strength:${RESET} Good (2048+ bits)"
                 elif [[ "$key_size" -ge 1024 ]]; then
-                    echo -e "  ${ORANGE}⚠️  ${BOLD}Strength:${RESET} Weak (< 2048 bits, upgrade recommended)"
+                    echo -e "  ${ORANGE}[!] ${BOLD}Strength:${RESET} Weak (< 2048 bits, upgrade recommended)"
                 else
-                    echo -e "  ${RED}❌ ${BOLD}Strength:${RESET} Insecure (< 1024 bits, DO NOT USE)"
+                    echo -e "  ${RED}[X] ${BOLD}Strength:${RESET} Insecure (< 1024 bits, DO NOT USE)"
                 fi
             fi
             
@@ -1370,19 +1328,19 @@ run_testssl() {
             echo -e "  ${WHITE}Algorithm:${RESET} $sig_algo"
             
             if [[ "$sig_algo" == *"sha256"* ]] || [[ "$sig_algo" == *"sha384"* ]] || [[ "$sig_algo" == *"sha512"* ]]; then
-                echo -e "  ${LIME}✅ ${BOLD}Security:${RESET} Modern (SHA-256/384/512)"
+                echo -e "  ${LIME}[OK] ${BOLD}Security:${RESET} Modern (SHA-256/384/512)"
             elif [[ "$sig_algo" == *"sha1"* ]]; then
-                echo -e "  ${RED}❌ ${BOLD}Security:${RESET} Deprecated (SHA-1 is broken, DO NOT USE)"
+                echo -e "  ${RED}[X] ${BOLD}Security:${RESET} Deprecated (SHA-1 is broken, DO NOT USE)"
             elif [[ "$sig_algo" == *"md5"* ]]; then
-                echo -e "  ${RED}❌ ${BOLD}Security:${RESET} Insecure (MD5 is broken, DO NOT USE)"
+                echo -e "  ${RED}[X] ${BOLD}Security:${RESET} Insecure (MD5 is broken, DO NOT USE)"
             fi
             
             # 5. Self-signed check
             echo -e "\n${CYAN}${BOLD}5. Certificate Type${RESET}"
             if [[ "$subject" == "$issuer" ]]; then
-                echo -e "  ${BLUE}ℹ️  ${BOLD}Type:${RESET} Self-signed (Root CA or testing)"
+                echo -e "  ${BLUE}[i] ${BOLD}Type:${RESET} Self-signed (Root CA or testing)"
             else
-                echo -e "  ${GREEN}✅ ${BOLD}Type:${RESET} CA-signed certificate"
+                echo -e "  ${GREEN}[OK] ${BOLD}Type:${RESET} CA-signed certificate"
             fi
             
             # 6. Fingerprints
@@ -1397,29 +1355,30 @@ run_testssl() {
             press_enter_to_continue
             ;;
             
-        2)  # Remote server scan with testssl
-            if [[ ! -f "$TESTSSL_PATH" ]]; then
-                echo -e "\n${RED}Error: testssl.sh not found.${RESET}"
+        2)  # Remote server scan
+    if [[ ! -f "$TESTSSL_PATH" ]]; then
+                echo -e "\n${RED}SSL/TLS scanning tool not installed.${RESET}"
                 echo -e "${YELLOW}Please install it first using option [3] in Security Audit menu.${RESET}"
-                press_enter_to_continue
-                return
-            fi
-            
-            echo -en "\n${MAGENTA}${BOLD}Enter domain/IP to scan (e.g., google.com): ${RESET}"
+        press_enter_to_continue
+        return
+    fi
+    
+            echo -en "\n${MAGENTA}${BOLD}Enter domain or IP to scan (e.g., example.com, 192.168.1.1): ${RESET}"
             read -r domain
             domain=$(echo "$domain" | xargs)
             
-            if [[ -z "$domain" ]]; then
-                echo -e "${RED}No domain provided.${RESET}"
+    if [[ -z "$domain" ]]; then
+                echo -e "${RED}No domain/IP provided.${RESET}"
                 press_enter_to_continue
-                return
-            fi
-            
-            echo -e "\n${CYAN}Starting scan on ${BOLD}$domain${RESET}... ${DIM}(This may take several minutes)${RESET}\n"
-            "$TESTSSL_PATH" -p "$domain"
-            
+        return
+    fi
+    
+            echo -e "\n${CYAN}Starting SSL/TLS scan on ${BOLD}$domain${RESET}...${RESET}"
+            echo -e "${DIM}This may take several minutes depending on server configuration${RESET}\n"
+    "$TESTSSL_PATH" -p "$domain"
+    
             echo -e "\n${GREEN}Scan complete.${RESET}"
-            press_enter_to_continue
+    press_enter_to_continue
             ;;
             
         q|Q)
@@ -1438,7 +1397,7 @@ security_audit_menu() {
         print_section_header "Security Audit Menu"
         echo -e "  ${PURPLE}${BOLD}[1]${RESET} ${WHITE}Run Local System Audit${RESET} ${DIM}(6 security checks)${RESET}"
         echo -e "  ${PURPLE}${BOLD}[2]${RESET} ${WHITE}Analyze Certificate Security${RESET} ${DIM}(local or remote)${RESET}"
-        echo -e "  ${YELLOW}${BOLD}[3]${RESET} ${WHITE}Install / Update testssl.sh${RESET}"
+        echo -e "  ${YELLOW}${BOLD}[3]${RESET} ${WHITE}Install SSL/TLS Scanner${RESET} ${DIM}(for remote servers)${RESET}"
         echo -e "  ${YELLOW}${BOLD}[q]${RESET} ${WHITE}Return to Main Menu${RESET}"
         
         echo -en "\n${MAGENTA}${BOLD}Your choice: ${RESET}"
@@ -1448,7 +1407,10 @@ security_audit_menu() {
         case "$choice" in
             1)  # Local Audit
                 print_section_header "Local System Audit"
-                echo -e "${DIM}Analyzing local security configuration...${RESET}\n"
+                echo -e "${CYAN}${BOLD}What is this?${RESET}"
+                echo -e "${DIM}This audit checks your local system security configuration to ensure${RESET}"
+                echo -e "${DIM}that your encryption environment is secure and properly configured.${RESET}\n"
+                echo -e "${DIM}Running 6 security checks...${RESET}\n"
                 local score=0
                 local max_score=7
                 
@@ -1456,27 +1418,27 @@ security_audit_menu() {
                 echo -e "${PURPLE}${BOLD}1. OpenSSL Version & Capabilities${RESET}"
                 local version
                 version=$(openssl version | cut -d' ' -f2)
-                echo -e "  ${LIME}✅ ${BOLD}Installed:${RESET} $version"
+                echo -e "  ${LIME}[OK] ${BOLD}Installed:${RESET} $version"
                 if [[ "$(echo "$version" | cut -d. -f1)" -ge 3 ]] || \
                    [[ "$(echo "$version" | cut -d. -f1)" -eq 1 && "$(echo "$version" | cut -d. -f2)" -eq 1 && "$(echo "$version" | cut -d. -f3 | tr -d 'a-z')" -ge 1 ]]; then
-                    echo -e "  ${LIME}✅ ${BOLD}Version:${RESET} Modern (1.1.1+ or 3.x.x+)"
+                    echo -e "  ${LIME}[OK] ${BOLD}Version:${RESET} Modern (1.1.1+ or 3.x.x+)"
                     ((score++))
                 else
-                    echo -e "  ${ORANGE}⚠️  ${BOLD}Version:${RESET} Outdated. Upgrade to 1.1.1+ or 3.x recommended"
+                    echo -e "  ${ORANGE}[!] ${BOLD}Version:${RESET} Outdated. Upgrade to 1.1.1+ or 3.x recommended"
                 fi
                 
                 # Test CMS support
                 if openssl cms -help 2>&1 | grep -q "encrypt" 2>/dev/null; then
-                    echo -e "  ${LIME}✅ ${BOLD}CMS Support:${RESET} Available (modern AEAD ciphers supported)"
+                    echo -e "  ${LIME}[OK] ${BOLD}CMS Support:${RESET} Available (for S/MIME certificate encryption)"
                     ((score++))
                 else
-                    echo -e "  ${ORANGE}⚠️  ${BOLD}CMS Support:${RESET} Not available (fallback to CBC mode)"
+                    echo -e "  ${ORANGE}[!] ${BOLD}CMS Support:${RESET} Not available (S/MIME may not work)"
                 fi
                 
                 # 2. Private Key Permissions
                 echo -e "\n${PURPLE}${BOLD}2. Private Key Security${RESET}"
                 if [[ ! -d "$CERT_DIR" ]] || [[ -z "$(ls -A "$CERT_DIR"/*.key 2>/dev/null)" ]]; then
-                    echo -e "  ${BLUE}ℹ️  ${BOLD}Status:${RESET} No private keys found in $CERT_DIR"
+                    echo -e "  ${BLUE}[i] ${BOLD}Status:${RESET} No private keys found in $CERT_DIR"
                     ((score++))  # No keys = secure by default
                 else
                     local insecure_keys=0
@@ -1487,7 +1449,7 @@ security_audit_menu() {
                             local perms
                             perms=$(stat -c "%a" "$key" 2>/dev/null || stat -f "%Lp" "$key")
                             if [[ "$perms" != "400" && "$perms" != "600" ]]; then
-                                echo -e "  ${RED}❌ ${BOLD}Vulnerable:${RESET} $(basename "$key") (permissions: $perms)"
+                                echo -e "  ${RED}[X] ${BOLD}Vulnerable:${RESET} $(basename "$key") (permissions: $perms)"
                                 echo -e "     ${DIM}Fix: ${BOLD}chmod 400 $key${RESET}"
                                 ((insecure_keys++))
                             fi
@@ -1495,17 +1457,17 @@ security_audit_menu() {
                     done
                     
                     if [[ $insecure_keys -eq 0 ]]; then
-                        echo -e "  ${LIME}✅ ${BOLD}Status:${RESET} All $total_keys private keys secured (400/600)"
+                        echo -e "  ${LIME}[OK] ${BOLD}Status:${RESET} All $total_keys private keys secured (400/600)"
                         ((score++))
                     else
-                        echo -e "  ${RED}❌ ${BOLD}Status:${RESET} $insecure_keys/$total_keys keys have weak permissions"
+                        echo -e "  ${RED}[X] ${BOLD}Status:${RESET} $insecure_keys/$total_keys keys have weak permissions"
                     fi
                 fi
                 
                 # 3. Certificate Expiration Check
                 echo -e "\n${PURPLE}${BOLD}3. Certificate Expiration Status${RESET}"
                 if [[ ! -d "$CERT_DIR" ]] || [[ -z "$(ls -A "$CERT_DIR"/*.pem 2>/dev/null)" ]]; then
-                    echo -e "  ${BLUE}ℹ️  ${BOLD}Status:${RESET} No certificates found"
+                    echo -e "  ${BLUE}[i] ${BOLD}Status:${RESET} No certificates found"
                     ((score++))
                 else
                     local expired_certs=0
@@ -1516,12 +1478,12 @@ security_audit_menu() {
                             ((total_certs++))
                             openssl x509 -in "$cert" -noout -checkend 0 &>/dev/null
                             if [[ $? -ne 0 ]]; then
-                                echo -e "  ${RED}❌ ${BOLD}Expired:${RESET} $(basename "$cert")"
+                                echo -e "  ${RED}[X] ${BOLD}Expired:${RESET} $(basename "$cert")"
                                 ((expired_certs++))
                             else
                                 openssl x509 -in "$cert" -noout -checkend 2592000 &>/dev/null
                                 if [[ $? -ne 0 ]]; then
-                                    echo -e "  ${ORANGE}⚠️  ${BOLD}Expiring:${RESET} $(basename "$cert") (< 30 days)"
+                                    echo -e "  ${ORANGE}[!] ${BOLD}Expiring:${RESET} $(basename "$cert") (< 30 days)"
                                     ((expiring_soon++))
                                 fi
                             fi
@@ -1529,13 +1491,13 @@ security_audit_menu() {
                     done
                     
                     if [[ $expired_certs -eq 0 ]] && [[ $expiring_soon -eq 0 ]]; then
-                        echo -e "  ${LIME}✅ ${BOLD}Status:${RESET} All $total_certs certificates valid"
+                        echo -e "  ${LIME}[OK] ${BOLD}Status:${RESET} All $total_certs certificates valid"
                         ((score++))
                     elif [[ $expired_certs -eq 0 ]]; then
-                        echo -e "  ${ORANGE}⚠️  ${BOLD}Status:${RESET} $expiring_soon/$total_certs expiring soon"
+                        echo -e "  ${ORANGE}[!] ${BOLD}Status:${RESET} $expiring_soon/$total_certs expiring soon"
                         ((score++))
                     else
-                        echo -e "  ${RED}❌ ${BOLD}Status:${RESET} $expired_certs expired, $expiring_soon expiring soon"
+                        echo -e "  ${RED}[X] ${BOLD}Status:${RESET} $expired_certs expired, $expiring_soon expiring soon"
                     fi
                 fi
                 
@@ -1545,14 +1507,14 @@ security_audit_menu() {
                     local dir_perms
                     dir_perms=$(stat -c "%a" "$CONFIG_DIR" 2>/dev/null || stat -f "%Lp" "$CONFIG_DIR")
                     if [[ "$dir_perms" == "700" ]] || [[ "$dir_perms" == "755" ]]; then
-                        echo -e "  ${LIME}✅ ${BOLD}Status:${RESET} $CONFIG_DIR properly secured ($dir_perms)"
+                        echo -e "  ${LIME}[OK] ${BOLD}Status:${RESET} $CONFIG_DIR properly secured ($dir_perms)"
                         ((score++))
                     else
-                        echo -e "  ${ORANGE}⚠️  ${BOLD}Warning:${RESET} Unusual permissions ($dir_perms)"
+                        echo -e "  ${ORANGE}[!] ${BOLD}Warning:${RESET} Unusual permissions ($dir_perms)"
                         echo -e "     ${DIM}Recommended: ${BOLD}chmod 700 $CONFIG_DIR${RESET}"
                     fi
                 else
-                    echo -e "  ${BLUE}ℹ️  ${BOLD}Status:${RESET} Config directory not yet created"
+                    echo -e "  ${BLUE}[i] ${BOLD}Status:${RESET} Config directory not yet created"
                     ((score++))
                 fi
                 
@@ -1562,10 +1524,10 @@ security_audit_menu() {
                     local old_enc_files
                     old_enc_files=$(find /tmp -name "encryptor_*" -type d -mtime +1 2>/dev/null | wc -l)
                     if [[ $old_enc_files -eq 0 ]]; then
-                        echo -e "  ${LIME}✅ ${BOLD}Status:${RESET} No stale temporary files"
+                        echo -e "  ${LIME}[OK] ${BOLD}Status:${RESET} No stale temporary files"
                         ((score++))
                     else
-                        echo -e "  ${ORANGE}⚠️  ${BOLD}Warning:${RESET} Found $old_enc_files old temp directories"
+                        echo -e "  ${ORANGE}[!] ${BOLD}Warning:${RESET} Found $old_enc_files old temp directories"
                         echo -e "     ${DIM}They will be auto-cleaned on next encryptor restart${RESET}"
                         ((score++))
                     fi
@@ -1577,10 +1539,10 @@ security_audit_menu() {
                 bash_ver=$(bash --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
                 bash_major=$(echo "$bash_ver" | cut -d. -f1)
                 if [[ "$bash_major" -ge 4 ]]; then
-                    echo -e "  ${LIME}✅ ${BOLD}Bash Version:${RESET} $bash_ver (modern)"
+                    echo -e "  ${LIME}[OK] ${BOLD}Bash Version:${RESET} $bash_ver (modern)"
                     ((score++))
                 else
-                    echo -e "  ${ORANGE}⚠️  ${BOLD}Bash Version:${RESET} $bash_ver (consider upgrading to 4.0+)"
+                    echo -e "  ${ORANGE}[!] ${BOLD}Bash Version:${RESET} $bash_ver (consider upgrading to 4.0+)"
                 fi
                 
                 # Summary
