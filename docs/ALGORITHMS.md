@@ -1,340 +1,211 @@
-# 🔐 Encryption Algorithms Guide
+# Encryption Algorithms in Encryptor
 
-This document provides detailed information about the encryption algorithms supported by Encryptor, including their technical specifications, use cases, and security considerations.
-
-## Table of Contents
-
-- [Overview](#overview)
-- [AES-256 (Advanced Encryption Standard)](#aes-256-advanced-encryption-standard)
-- [RSA (Rivest-Shamir-Adleman)](#rsa-rivest-shamir-adleman)
-- [Hybrid AES+RSA](#hybrid-aes-rsa)
-- [3DES (Triple Data Encryption Standard)](#3des-triple-data-encryption-standard)
-- [Algorithm Comparison](#algorithm-comparison)
-- [Security Best Practices](#security-best-practices)
-- [Technical Implementation](#technical-implementation)
-
-## Overview
-
-Encryptor supports four robust encryption algorithms, each designed for specific use cases and security requirements. All implementations use industry-standard OpenSSL cryptographic primitives to ensure maximum security and compatibility.
-
-## AES-256 (Advanced Encryption Standard)
-
-### Description
-
-AES-256 is a symmetric block cipher that uses a 256-bit key for encryption. It's the gold standard for modern encryption and is approved by the U.S. National Security Agency (NSA) for protecting classified information up to the TOP SECRET level.
-
-### Technical Specifications
-
-- **Algorithm Type**: Symmetric block cipher
-- **Key Size**: 256 bits
-- **Block Size**: 128 bits (16 bytes)
-- **Mode**: CBC (Cipher Block Chaining)
-- **Key Derivation**: PBKDF2 with SHA-256
-- **Salt**: Random 64-bit salt for each encryption
-- **Iterations**: 100,000 PBKDF2 iterations
-
-### Security Level
-
-⭐⭐⭐⭐⭐ **Military Grade**
-
-- **Theoretical Security**: 2^256 possible keys (practically unbreakable)
-- **Known Attacks**: No practical attacks against AES-256
-- **Compliance**: FIPS 140-2 approved, NSA Suite B
-
-### Use Cases
-
-- **Best For**: General-purpose file encryption
-- **File Size**: Unlimited (scales efficiently)
-- **Performance**: Excellent (hardware acceleration available)
-- **Key Sharing**: Requires secure key exchange
-
-### Implementation Details
-
-```bash
-# Encryption command used internally
-openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
-    -in input_file -out output_file -pass pass:"user_password"
-
-# Decryption command used internally
-openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
-    -in encrypted_file -out output_file -pass pass:"user_password"
-```
-
-### Advantages
-
-- ✅ Extremely secure with proper implementation
-- ✅ Fast encryption/decryption speeds
-- ✅ Widely supported and tested
-- ✅ Hardware acceleration available on modern CPUs
-- ✅ No practical file size limitations
-
-### Limitations
-
-- ⚠️ Requires secure password/key distribution
-- ⚠️ Same key for encryption and decryption
-- ⚠️ Password-based security (vulnerable to weak passwords)
-
-## RSA (Rivest-Shamir-Adleman)
-
-### Description
-
-RSA is an asymmetric (public-key) cryptographic algorithm that uses a pair of mathematically related keys. It's primarily used for secure key exchange and digital signatures, with limited direct file encryption capabilities due to size constraints.
-
-### Technical Specifications
-
-- **Algorithm Type**: Asymmetric (public-key) cryptography
-- **Key Size**: 2048 bits (default)
-- **Padding**: PKCS#1 v1.5 (OpenSSL default)
-- **Maximum Data Size**: ~200 bytes per encryption block
-- **Key Generation**: Secure random prime number generation
-
-### Security Level
-
-⭐⭐⭐⭐ **Very Secure**
-
-- **Security Basis**: Integer factorization problem
-- **Key Strength**: 2048-bit keys considered secure until 2030+
-- **Known Attacks**: No practical attacks against properly implemented 2048-bit RSA
-- **Post-Quantum**: Vulnerable to future quantum computers
-
-### Use Cases
-
-- **Best For**: Small files, key exchange, digital signatures
-- **File Size**: Maximum ~200 bytes per encryption operation
-- **Performance**: Slower than symmetric algorithms
-- **Key Sharing**: Public key can be shared openly
-
-### Implementation Details
-
-```bash
-# Key generation
-openssl genrsa -out private_key.pem 2048
-openssl rsa -in private_key.pem -pubout -out public_key.pem
-
-# Encryption
-openssl pkeyutl -encrypt -pubin -inkey public_key.pem \
-    -in input_file -out encrypted_file
-
-# Decryption
-openssl pkeyutl -decrypt -inkey private_key.pem \
-    -in encrypted_file -out output_file
-```
-
-### Advantages
-
-- ✅ No key distribution problem (public key cryptography)
-- ✅ Enables secure communication without prior key exchange
-- ✅ Well-established and thoroughly analyzed
-- ✅ Suitable for digital signatures and authentication
-- ✅ Industry standard for secure communications
-
-### Limitations
-
-- ⚠️ Very limited file size (maximum ~200 bytes)
-- ⚠️ Significantly slower than symmetric encryption
-- ⚠️ Larger key sizes required for equivalent security
-- ⚠️ Vulnerable to future quantum computing attacks
-
-## Hybrid AES+RSA
-
-### Description
-
-Hybrid encryption combines the best aspects of both symmetric and asymmetric encryption. A random AES key is generated for each encryption operation, the file is encrypted with AES-256, and then the AES key is encrypted with RSA for secure distribution.
-
-### Technical Specifications
-
-- **File Encryption**: AES-256-CBC with random key
-- **Key Encryption**: RSA-2048 for AES key protection
-- **Key Generation**: Cryptographically secure random 256-bit AES keys
-- **Key Derivation**: PBKDF2 for AES key strengthening
-- **Components**: Encrypted file + encrypted key + RSA private key
-
-### Security Level
-
-⭐⭐⭐⭐⭐ **Maximum Security**
-
-- **Combined Strength**: Benefits from both AES-256 and RSA-2048 security
-- **Key Management**: Secure key distribution via public-key cryptography
-- **Perfect Forward Secrecy**: Each encryption uses a unique AES key
-
-### Use Cases
-
-- **Best For**: Maximum security requirements, large files with secure key exchange
-- **File Size**: Unlimited (AES handles the bulk encryption)
-- **Performance**: Fast (AES) with secure key exchange (RSA)
-- **Key Sharing**: RSA public key can be shared; private key remains secret
-
-### Implementation Process
-
-1. **Generate RSA key pair** (2048-bit)
-2. **Generate random AES key** (256-bit)
-3. **Encrypt file with AES-256** using the random key
-4. **Encrypt AES key with RSA public key**
-5. **Store**: Encrypted file + Encrypted AES key + RSA private key
-
-### Advantages
-
-- ✅ Maximum security combining both algorithm strengths
-- ✅ No file size limitations
-- ✅ Secure key distribution
-- ✅ Fast encryption of large files
-- ✅ Perfect forward secrecy with unique keys per encryption
-- ✅ Suitable for secure file sharing
-
-### Limitations
-
-- ⚠️ More complex key management (3 components)
-- ⚠️ Requires careful handling of multiple files
-- ⚠️ Slightly more overhead than pure AES
-
-## 3DES (Triple Data Encryption Standard)
-
-### Description
-
-3DES applies the DES algorithm three times to each data block, effectively using a 168-bit key length. While still considered secure, it's primarily maintained for legacy compatibility and is gradually being phased out in favor of AES.
-
-### Technical Specifications
-
-- **Algorithm Type**: Symmetric block cipher
-- **Key Size**: 168 bits (effective), 192 bits (actual)
-- **Block Size**: 64 bits (8 bytes)
-- **Mode**: CBC (Cipher Block Chaining)
-- **Key Derivation**: PBKDF2 with SHA-256
-- **Iterations**: 100,000 PBKDF2 iterations
-
-### Security Level
-
-⭐⭐⭐ **Legacy Secure**
-
-- **Current Status**: Still secure but deprecated
-- **Vulnerabilities**: Sweet32 attack (theoretical, requires massive data)
-- **Compliance**: Being phased out by security standards
-- **Recommended Until**: 2023 (NIST recommendation)
-
-### Use Cases
-
-- **Best For**: Legacy system compatibility
-- **File Size**: Unlimited (but slower than AES)
-- **Performance**: Slower than AES-256
-- **Migration Path**: Should migrate to AES-256
-
-### Implementation Details
-
-```bash
-# Encryption
-openssl enc -des-ede3-cbc -salt -pbkdf2 -iter 100000 \
-    -in input_file -out output_file -pass pass:"user_password"
-
-# Decryption
-openssl enc -d -des-ede3-cbc -pbkdf2 -iter 100000 \
-    -in encrypted_file -out output_file -pass pass:"user_password"
-```
-
-### Advantages
-
-- ✅ Widely supported in legacy systems
-- ✅ Well-tested and analyzed
-- ✅ Still considered secure for most applications
-- ✅ Compatible with older systems
-
-### Limitations
-
-- ⚠️ Slower than AES
-- ⚠️ Smaller block size (64-bit vs 128-bit)
-- ⚠️ Being phased out by security standards
-- ⚠️ Not recommended for new implementations
-
-## Algorithm Comparison
-
-| Algorithm | Security | Speed | File Size | Key Management | Best Use Case |
-|-----------|----------|--------|-----------|----------------|---------------|
-| **AES-256** | ⭐⭐⭐⭐⭐ | Very Fast | Unlimited | Password-based | General purpose |
-| **RSA** | ⭐⭐⭐⭐ | Slow | ~200 bytes | Public/Private key | Small files, key exchange |
-| **Hybrid AES+RSA** | ⭐⭐⭐⭐⭐ | Fast | Unlimited | Public/Private key | Maximum security |
-| **3DES** | ⭐⭐⭐ | Moderate | Unlimited | Password-based | Legacy compatibility |
-
-## Security Best Practices
-
-### Password Security
-
-- **Minimum Length**: 12+ characters
-- **Complexity**: Mix of uppercase, lowercase, numbers, symbols
-- **Uniqueness**: Use different passwords for different files
-- **Storage**: Use a reputable password manager
-
-### Key Management
-
-- **RSA Keys**: Store private keys securely, share public keys freely
-- **Backup**: Keep secure backups of important keys
-- **Rotation**: Regularly rotate encryption keys for sensitive data
-- **Access Control**: Limit access to private keys
-
-### File Handling
-
-- **Secure Deletion**: Use secure delete tools for sensitive plaintext files
-- **Backup Strategy**: Encrypt backups with different keys
-- **Transport Security**: Use secure channels for sharing encrypted files
-- **Verification**: Verify file integrity after encryption/decryption
-
-### Algorithm Selection Guidelines
-
-1. **For general use**: Choose AES-256
-2. **For maximum security**: Choose Hybrid AES+RSA
-3. **For small files/keys**: Choose RSA
-4. **For legacy systems only**: Choose 3DES
-
-## Technical Implementation
-
-### Error Handling
-
-Encryptor implements robust error handling for:
-
-- Invalid file permissions
-- Corrupted encrypted files
-- Wrong passwords/keys
-- Insufficient disk space
-- OpenSSL errors
-
-### Temporary Files
-
-- All temporary files created in `/tmp/encryptor_$$`
-- Automatic cleanup on script exit
-- Secure permissions (600) on temporary files
-- No plaintext passwords stored in temporary files
-
-### Randomness
-
-- Uses OpenSSL's cryptographically secure random number generator
-- Proper salt generation for each encryption operation
-- Secure key generation for RSA and AES keys
-
-### Compatibility
-
-- **OpenSSL Version**: Requires OpenSSL 1.1.0 or higher
-- **Platform Support**: Linux, macOS, WSL
-- **File Systems**: Compatible with all major file systems
-- **Character Encoding**: Handles binary files correctly
-
-## Performance Benchmarks
-
-Approximate performance on modern hardware:
-
-| Algorithm | Encryption Speed | Decryption Speed | CPU Usage |
-|-----------|-----------------|------------------|-----------|
-| AES-256 | ~100 MB/s | ~100 MB/s | Low |
-| RSA | ~1 KB/s | ~10 KB/s | High |
-| Hybrid | ~95 MB/s | ~95 MB/s | Low-Medium |
-| 3DES | ~30 MB/s | ~30 MB/s | Medium |
-
-*Note: Performance varies based on hardware, file size, and system load.*
+This document describes the encryption algorithms available in Encryptor v2.1.0,
+their security properties, appropriate use cases, and implementation details.
 
 ---
 
-## Further Reading
+## Quick Reference
 
-- [NIST Special Publication 800-57](https://csrc.nist.gov/publications/detail/sp/800-57-part-1/rev-5/final) - Key Management Guidelines
-- [RFC 3447](https://tools.ietf.org/html/rfc3447) - RSA PKCS #1 v2.1
-- [FIPS 197](https://csrc.nist.gov/publications/detail/fips/197/final) - AES Standard
-- [OpenSSL Documentation](https://www.openssl.org/docs/) - Implementation Details
+| Algorithm | Type | Authentication | Key Size | Recommended |
+|-----------|------|----------------|----------|-------------|
+| **AES-256-GCM** | Symmetric | ✅ AEAD | 256-bit | ✅ **Default** |
+| **S/MIME** | Asymmetric | ✅ AEAD | RSA 2048-4096 | ✅ For recipients |
+| AES-256-CBC | Symmetric | ❌ None | 256-bit | ⚠ Legacy only |
+| AES-256-CTR | Symmetric | ❌ None | 256-bit | ⚠ Legacy only |
+| ChaCha20 | Symmetric | ❌ None | 256-bit | ⚠ No auth |
+| Camellia-256-CBC | Symmetric | ❌ None | 256-bit | ⚠ Compatibility |
+| ARIA-256-CBC | Symmetric | ❌ None | 256-bit | ⚠ Compatibility |
 
-For questions or security concerns, please review the main documentation or submit an issue on the project repository.
+> **What is AEAD?**
+> Authenticated Encryption with Associated Data — the cipher provides both
+> *confidentiality* (data is secret) and *integrity* (data has not been tampered with).
+> Non-AEAD modes only provide confidentiality.
+
+---
+
+## Recommended Algorithms
+
+### AES-256-GCM — Default Recommended
+
+**Type:** Symmetric (password-based)
+**Authentication:** ✅ AEAD
+**Key size:** 256-bit
+**Block size:** 128-bit
+**Mode:** Galois/Counter Mode (GCM)
+
+AES-256-GCM is the gold standard for symmetric encryption in 2024. It is:
+- NIST-approved (FIPS 197 + SP 800-38D)
+- Used in TLS 1.3, SSH, Signal Protocol, and virtually every modern security system
+- Authenticated: decryption will fail if the ciphertext is tampered with
+- Parallelizable for high throughput
+- Hardware-accelerated on Intel (AES-NI) and ARM (ARMv8 Crypto)
+
+**Implementation in Encryptor:**
+```
+Key derivation: PBKDF2-HMAC-SHA256, 600,000 iterations, random 8-byte salt
+Encryption:     OpenSSL enc -aes-256-gcm -salt -pbkdf2 -iter 600000
+Password:       Passed via file descriptor (never on command line)
+Integrity:      SHA-256 sidecar file written alongside .enc file
+```
+
+**When to use:**
+- Default choice for all new encrypted files
+- Any situation where you need password-based symmetric encryption
+
+---
+
+### S/MIME (Certificate-Based) — Recommended for Recipients
+
+**Type:** Asymmetric (certificate/key-based)
+**Authentication:** ✅ AEAD (AES-256-GCM for content encryption)
+**Key wrap:** RSA 2048–4096-bit
+**Standard:** RFC 5751 (S/MIME v3.2)
+
+S/MIME encrypts for a specific recipient using their X.509 public certificate.
+Only the holder of the matching private key can decrypt. No shared password is needed.
+
+**Implementation in Encryptor:**
+```
+Encryption: openssl smime -encrypt -aes256-gcm -outform PEM recipient.pem
+Decryption: openssl smime -decrypt -recip cert.pem -inkey key.pem
+```
+
+**When to use:**
+- Encrypting files for a specific person or system
+- When no shared secret is possible
+- Email attachments with S/MIME-capable clients (Thunderbird, Outlook)
+- Server-to-server secure file transfer
+
+---
+
+## Legacy / Compatibility Algorithms
+
+These algorithms provide **confidentiality only** — they have **no authentication**.
+A tampered or corrupted encrypted file may silently produce garbage output or
+no error at all on decryption.
+
+Encryptor writes a SHA-256 integrity sidecar file (`.sha256`) for all modes
+and verifies it before decryption to partially compensate, but this is an
+external check, not built into the cipher.
+
+**Use legacy algorithms only for:**
+- Interoperability with older systems that do not support GCM
+- Re-encrypting existing legacy files
+
+### AES-256-CBC
+
+**Standard:** NIST FIPS 197 + SP 800-38A
+**Mode:** Cipher Block Chaining
+**Auth:** None — no integrity protection
+**Note:** Susceptible to padding oracle attacks if not used with constant-time
+decryption and MAC verification. Encryptor's PBKDF2 key derivation and SHA-256
+sidecar mitigate but do not eliminate the risk.
+
+### AES-256-CTR
+
+**Mode:** Counter Mode (stream cipher behavior)
+**Auth:** None
+**Note:** Bit-flipping attacks are possible. Nonce reuse is catastrophic.
+OpenSSL manages the nonce internally, but there is no authentication guarantee.
+
+### ChaCha20
+
+**Origin:** D.J. Bernstein, 2008
+**Standard:** RFC 7539
+**Auth:** None (ChaCha20-Poly1305 would provide AEAD — planned for a future release)
+**Note:** Excellent performance on platforms without AES hardware acceleration.
+
+### Camellia-256-CBC
+
+**Origin:** NTT and KDDI (Japan), 2000
+**Standard:** ISO/IEC 18033-3, RFC 3713
+**Auth:** None
+**Security:** Equivalent to AES-256 by design. No known practical attacks.
+**When to use:** Compliance requirements mandating Japanese national cryptography standards.
+
+### ARIA-256-CBC
+
+**Origin:** NSRI / KISA (South Korea), 2003
+**Standard:** ISO/IEC 18033-3, RFC 5794
+**Auth:** None
+**Security:** Equivalent to AES-256. No known practical attacks.
+**When to use:** Compliance requirements mandating Korean national cryptography standards.
+
+---
+
+## Key Derivation
+
+All password-based algorithms use **PBKDF2-HMAC-SHA256** for key derivation:
+
+| Parameter | Value | Standard |
+|-----------|-------|----------|
+| Algorithm | PBKDF2-HMAC-SHA256 | NIST SP 800-132 |
+| Iterations | **600,000** | OWASP 2024 recommendation |
+| Salt | 8 bytes random | OpenSSL default |
+| Output key length | 256 bits | Matches cipher key size |
+
+> **Why 600,000 iterations?**
+> OWASP's [Password Storage Cheat Sheet (2024)](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+> recommends 600,000 iterations for PBKDF2-HMAC-SHA256. This raises the cost
+> of brute-force attacks while remaining fast enough for interactive use
+> (approximately 0.5 to 2 seconds on modern hardware).
+
+---
+
+## Integrity Verification
+
+For all encryption operations, Encryptor writes a SHA-256 hash file alongside
+the encrypted output:
+
+```
+myfile.txt         ->  myfile.txt.enc
+                       myfile.txt.enc.sha256
+```
+
+Before decryption, Encryptor:
+1. Reads the `.sha256` sidecar
+2. Computes the current SHA-256 of the `.enc` file
+3. Compares them — failure aborts decryption with a warning
+
+The user can override the integrity check, but this is not recommended.
+
+---
+
+## Password Security
+
+Passwords are **never** passed on the command line. Encryptor writes the password
+to a temporary file in a mode-600 file inside `/tmp/encryptor_$$` (which is
+cleaned up on exit via `trap`), then passes `file:/path` to OpenSSL.
+
+This means the password does NOT appear in:
+- `ps aux` / `ps -ef` output
+- `/proc/<pid>/cmdline`
+- Shell history (it is always read interactively via `read -rs`)
+- OpenSSL error messages
+
+---
+
+## Algorithm Comparison
+
+| Property | AES-256-GCM | AES-256-CBC | ChaCha20 | S/MIME |
+|----------|-------------|-------------|----------|--------|
+| Confidentiality | Yes | Yes | Yes | Yes |
+| Integrity (AEAD) | Yes | No | No | Yes |
+| Hardware accel | Yes | Yes | Yes | Yes |
+| NIST approved | Yes | Yes | No | Yes |
+| No shared secret | No | No | No | Yes |
+| Padding attacks | N/A | Risk | N/A | N/A |
+
+---
+
+## References
+
+- [NIST FIPS 197 — AES](https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf)
+- [NIST SP 800-38D — GCM](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38d.pdf)
+- [NIST SP 800-132 — Key Derivation](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-132.pdf)
+- [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+- [RFC 5751 — S/MIME v3.2](https://www.rfc-editor.org/rfc/rfc5751)
+- [RFC 7539 — ChaCha20-Poly1305](https://www.rfc-editor.org/rfc/rfc7539)
+- [RFC 3713 — Camellia](https://www.rfc-editor.org/rfc/rfc3713)
+- [RFC 5794 — ARIA](https://www.rfc-editor.org/rfc/rfc5794)
