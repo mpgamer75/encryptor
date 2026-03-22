@@ -206,13 +206,13 @@ check_requirements() {
         missing_pkg=1
     else
         ssl_version=$(openssl version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-        local major=$(echo "$ssl_version" | cut -d. -f1)
-        local minor=$(echo "$ssl_version" | cut -d. -f2)
-        
+        local major; major=$(echo "$ssl_version" | cut -d. -f1)
+        local minor; minor=$(echo "$ssl_version" | cut -d. -f2)
+
         # Check capabilities
-        local capabilities=$(check_openssl_capabilities "$ssl_version")
-        local has_cms=$(echo "$capabilities" | cut -d: -f1)
-        local has_aead=$(echo "$capabilities" | cut -d: -f2)
+        local capabilities; capabilities=$(check_openssl_capabilities "$ssl_version")
+        local has_cms; has_cms=$(echo "$capabilities" | cut -d: -f1)
+        local has_aead; has_aead=$(echo "$capabilities" | cut -d: -f2)
         
         echo -e "${GREEN}✅ OpenSSL $ssl_version detected${RESET}"
         

@@ -58,6 +58,6 @@ if [[ -d "$CONFIG_DIR" ]]; then
 fi
 
 # Clean leftover temp directories
-find /tmp -maxdepth 1 -name "encryptor_*" -type d 2>/dev/null -exec rm -rf {} + 2>/dev/null || true
+find /tmp -maxdepth 1 -name "encryptor_*" -type d -exec rm -rf {} + 2>/dev/null || true
 
 echo -e "\n${GREEN}${BOLD}Encryptor has been uninstalled.${RESET}"

@@ -14,7 +14,7 @@ VERSION="2.1.0"
 CONFIG_DIR="${ENCRYPTOR_CONFIG_DIR:-$HOME/.config/encryptor}"
 CERT_DIR="$CONFIG_DIR/certs"
 TOOLS_DIR="$CONFIG_DIR/tools"
-TESTSSL_PATH="$TOOLS_DIR/testssl.sh/testssl.sh"
+export TESTSSL_PATH="$TOOLS_DIR/testssl.sh/testssl.sh"
 TEMP_DIR="/tmp/encryptor_$$"
 LOG_FILE="$CONFIG_DIR/encryptor.log"
 

@@ -24,7 +24,7 @@ ALGORITHMS=(
 # --- Algorithm selection menu ---
 select_algorithm_menu() {
     print_section_header "Select Encryption Algorithm" >&2
-    echo -e "${DIM}AES-256-GCM is recommended for new encrypted files.${RESET}" >&2
+    echo -e "${DIM}AES-256-CBC is recommended for new encrypted files.${RESET}" >&2
 
     local i=1
     local options=()
@@ -33,15 +33,16 @@ select_algorithm_menu() {
     local sorted_keys=()
     local other_keys=()
     for key in "${!ALGORITHMS[@]}"; do
-        if [[ "$key" == "AES-256-GCM" || "$key" == "S/MIME (Certificate)" ]]; then
+        if [[ "$key" == "AES-256-CBC" || "$key" == "S/MIME (Certificate)" ]]; then
             sorted_keys+=("$key")
         else
             other_keys+=("$key")
         fi
     done
     # Sort other keys alphabetically
-    IFS=$'\n' sorted_keys+=( $(printf '%s\n' "${other_keys[@]}" | sort) )
-    unset IFS
+    local sorted_others
+    mapfile -t sorted_others < <(printf '%s\n' "${other_keys[@]}" | sort)
+    sorted_keys+=("${sorted_others[@]}")
 
     for key in "${sorted_keys[@]}"; do
         local value="${ALGORITHMS[$key]}"

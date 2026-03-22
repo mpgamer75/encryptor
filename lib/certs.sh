@@ -218,7 +218,7 @@ _cert_sign_csr() {
         press_enter_to_continue; return
     fi
 
-    local cert_out="$CERT_DIR/$(basename "${csr_file%.csr}").pem"
+    local cert_out; cert_out="$CERT_DIR/$(basename "${csr_file%.csr}").pem"
     echo -e "\n${CYAN}Signing (valid 1 year)...${RESET}"
     start_spinner "Signing certificate..."
 
