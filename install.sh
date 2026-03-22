@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Encryptor Installation Script - v2.0.0
-set -e
+# Encryptor Installation Script - v2.1.0
+set -eo pipefail
 
 # Colors
 RED="\e[31m"
@@ -11,12 +11,14 @@ BLUE="\e[34m"
 CYAN="\e[36m"
 BOLD="\e[1m"
 RESET="\e[0m"
+DIM="\e[2m"
 
 # Constants
-VERSION="2.0.0"
+VERSION="2.1.0"
 SCRIPT_NAME="encryptor.sh"
 BINARY_NAME="encryptor"
 GITHUB_URL="https://raw.githubusercontent.com/mpgamer75/encryptor/main"
+LIB_MODULES=("ui.sh" "crypto.sh" "certs.sh" "audit.sh")
 
 print_header() {
     echo -e "${CYAN}${BOLD}"
@@ -329,79 +331,138 @@ detect_shell() {
     echo
 }
 
-download_script() {
-    echo -e "${BLUE}Downloading Encryptor...${RESET}"
-    
-    if [[ -f "$SCRIPT_NAME" ]]; then
-        echo -e "${GREEN}✅ Found local $SCRIPT_NAME${RESET}"
-        return 0
-    fi
-    
+_fetch() {
+    local url="$1" dest="$2"
     if command -v curl >/dev/null 2>&1; then
-        if curl -fsSL "$GITHUB_URL/$SCRIPT_NAME" -o "$SCRIPT_NAME"; then
-            echo -e "${GREEN}✅ Download completed with curl${RESET}"
-        else
-            echo -e "${RED}Download failed with curl${RESET}"
-            exit 1
-        fi
+        curl -fsSL "$url" -o "$dest" || return 1
     elif command -v wget >/dev/null 2>&1; then
-        if wget -q "$GITHUB_URL/$SCRIPT_NAME" -O "$SCRIPT_NAME"; then
-            echo -e "${GREEN}✅ Download completed with wget${RESET}"
-        else
-            echo -e "${RED}Download failed with wget${RESET}"
-            exit 1
-        fi
+        wget -q "$url" -O "$dest" || return 1
     else
         echo -e "${RED}Error: Neither curl nor wget found${RESET}"
-        echo -e "${YELLOW}Please install curl or wget, or download manually${RESET}"
         exit 1
     fi
-    
-    if [[ ! -s "$SCRIPT_NAME" ]]; then
-        echo -e "${RED}Downloaded file is empty${RESET}"
+}
+
+_verify_sha256() {
+    local file="$1" expected="$2"
+    local actual
+    actual=$(sha256sum "$file" 2>/dev/null | awk '{print $1}' || \
+             shasum -a 256 "$file" 2>/dev/null | awk '{print $1}')
+    if [[ "$actual" != "$expected" ]]; then
+        echo -e "${RED}${BOLD}CHECKSUM MISMATCH for $file!${RESET}"
+        echo -e "${RED}Expected: $expected${RESET}"
+        echo -e "${RED}Actual:   $actual${RESET}"
+        echo -e "${RED}Download may be corrupt or tampered with. Aborting.${RESET}"
         exit 1
     fi
+    echo -e "${GREEN}  ✓ Checksum OK: $(basename "$file")${RESET}"
+}
+
+download_script() {
+    echo -e "${BLUE}Downloading Encryptor v${VERSION}...${RESET}"
+
+    local _tmp_dir
+    _tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$_tmp_dir"' RETURN
+
+    # Download main script
+    if [[ -f "$SCRIPT_NAME" ]]; then
+        echo -e "${GREEN}✅ Found local $SCRIPT_NAME — skipping download${RESET}"
+    else
+        echo -e "${BLUE}Downloading $SCRIPT_NAME ...${RESET}"
+        _fetch "$GITHUB_URL/$SCRIPT_NAME" "$_tmp_dir/$SCRIPT_NAME" || {
+            echo -e "${RED}Download failed${RESET}"; exit 1
+        }
+        [[ ! -s "$_tmp_dir/$SCRIPT_NAME" ]] && { echo -e "${RED}Empty download${RESET}"; exit 1; }
+
+        # Verify SHA-256 checksum if available
+        local sha_url="$GITHUB_URL/$SCRIPT_NAME.sha256"
+        if _fetch "$sha_url" "$_tmp_dir/$SCRIPT_NAME.sha256" 2>/dev/null; then
+            local expected; expected=$(awk '{print $1}' "$_tmp_dir/$SCRIPT_NAME.sha256")
+            _verify_sha256 "$_tmp_dir/$SCRIPT_NAME" "$expected"
+        else
+            echo -e "${YELLOW}  ⚠ No checksum file available — skipping integrity check${RESET}"
+        fi
+
+        cp "$_tmp_dir/$SCRIPT_NAME" "./$SCRIPT_NAME"
+        echo -e "${GREEN}✅ Downloaded $SCRIPT_NAME${RESET}"
+    fi
+
+    # Download lib/ modules
+    mkdir -p lib
+    for mod in "${LIB_MODULES[@]}"; do
+        if [[ -f "lib/$mod" ]]; then
+            echo -e "${GREEN}✅ Found local lib/$mod${RESET}"
+            continue
+        fi
+        echo -e "${BLUE}Downloading lib/$mod ...${RESET}"
+        _fetch "$GITHUB_URL/lib/$mod" "$_tmp_dir/$mod" || {
+            echo -e "${RED}Failed to download lib/$mod${RESET}"; exit 1
+        }
+        [[ ! -s "$_tmp_dir/$mod" ]] && { echo -e "${RED}Empty download: lib/$mod${RESET}"; exit 1; }
+
+        local sha_url="$GITHUB_URL/lib/$mod.sha256"
+        if _fetch "$sha_url" "$_tmp_dir/$mod.sha256" 2>/dev/null; then
+            local expected; expected=$(awk '{print $1}' "$_tmp_dir/$mod.sha256")
+            _verify_sha256 "$_tmp_dir/$mod" "$expected"
+        fi
+
+        cp "$_tmp_dir/$mod" "lib/$mod"
+        echo -e "${GREEN}✅ Downloaded lib/$mod${RESET}"
+    done
     echo
 }
 
 install_encryptor() {
     install_dir=""
+    lib_dir=""
     needs_path_config=false
-    
+
     # Determine installation directory
     if [[ $EUID -eq 0 ]]; then
         install_dir="/usr/local/bin"
+        lib_dir="/usr/local/lib/encryptor"
         echo -e "${GREEN}Installing system-wide in $install_dir${RESET}"
     else
-        # Try system directory first if writable
         if [[ -w "/usr/local/bin" ]]; then
             install_dir="/usr/local/bin"
+            lib_dir="/usr/local/lib/encryptor"
             echo -e "${GREEN}Installing system-wide in $install_dir (writable)${RESET}"
         else
-            # Fall back to user directory
             install_dir="$HOME/.local/bin"
+            lib_dir="$HOME/.local/lib/encryptor"
             needs_path_config=true
             echo -e "${GREEN}Installing for current user in $install_dir${RESET}"
-            
-            # Create user bin directory if it doesn't exist
-            if [[ ! -d "$install_dir" ]]; then
-                mkdir -p "$install_dir"
-                echo -e "${YELLOW}Created directory: $install_dir${RESET}"
-            fi
+            mkdir -p "$install_dir"
         fi
     fi
-    
-    # Copy and make executable
-    if cp "$SCRIPT_NAME" "$install_dir/$BINARY_NAME"; then
-        chmod +x "$install_dir/$BINARY_NAME"
-        echo -e "${GREEN}✅ Installation successful!${RESET}"
+
+    # Install lib/ modules first
+    mkdir -p "$lib_dir"
+    for mod in "${LIB_MODULES[@]}"; do
+        if [[ -f "lib/$mod" ]]; then
+            install -m 644 "lib/$mod" "$lib_dir/$mod"
+            echo -e "${GREEN}  ✓ Installed lib/$mod → $lib_dir/$mod${RESET}"
+        else
+            echo -e "${YELLOW}  ⚠ lib/$mod not found — skipping${RESET}"
+        fi
+    done
+
+    # Install main script and patch LIB_DIR to the installed lib path
+    local tmp_script
+    tmp_script=$(mktemp)
+    sed "s|LIB_DIR=\"\$SCRIPT_DIR/lib\"|LIB_DIR=\"${lib_dir}\"|" "$SCRIPT_NAME" > "$tmp_script"
+
+    if install -m 755 "$tmp_script" "$install_dir/$BINARY_NAME"; then
+        rm -f "$tmp_script"
+        echo -e "${GREEN}✅ Installed encryptor → $install_dir/$BINARY_NAME${RESET}"
     else
+        rm -f "$tmp_script"
         echo -e "${RED}Installation failed${RESET}"
-        echo -e "${YELLOW}If installing to $HOME/.local/bin, no sudo is needed.${RESET}"
-        echo -e "${YELLOW}If installing to /usr/local/bin, you may need to re-run with 'sudo'${RESET}"
+        echo -e "${YELLOW}Try re-running with 'sudo' or check permissions on $install_dir${RESET}"
         exit 1
     fi
-    
+
     # Configure PATH if needed
     if [[ "$needs_path_config" == true ]]; then
         configure_path "$install_dir"

@@ -1,9 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Debian Package Builder for Encryptor v2.0.0
-set -e
+# Debian Package Builder for Encryptor v2.1.0
+set -eo pipefail
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 PACKAGE_NAME="encryptor_${VERSION}-1_all.deb"
 
 echo "════════════════════════════════════════════════════════════════"
@@ -17,25 +17,39 @@ rm -rf debian/tmp encryptor_*.deb 2>/dev/null || true
 # Create package structure
 echo "[1/8] Creating package directory structure..."
 mkdir -p debian/tmp/usr/local/bin
+mkdir -p debian/tmp/usr/local/lib/encryptor
 mkdir -p debian/tmp/usr/share/doc/encryptor
 mkdir -p debian/tmp/usr/share/man/man1
 mkdir -p debian/tmp/DEBIAN
 
-# Copy main script
+# Copy main script and patch LIB_DIR to installed path
 echo "[2/8] Installing encryptor binary..."
-cp encryptor.sh debian/tmp/usr/local/bin/encryptor
+sed 's|LIB_DIR="$SCRIPT_DIR/lib"|LIB_DIR="/usr/local/lib/encryptor"|' \
+    encryptor.sh > debian/tmp/usr/local/bin/encryptor
 chmod 755 debian/tmp/usr/local/bin/encryptor
-echo "       ✓ Copied encryptor.sh → /usr/local/bin/encryptor"
+echo "       ✓ Installed encryptor → /usr/local/bin/encryptor (LIB_DIR patched)"
+
+# Copy lib/ modules
+echo "[2b/8] Installing library modules..."
+for mod in lib/ui.sh lib/crypto.sh lib/certs.sh lib/audit.sh; do
+    if [[ -f "$mod" ]]; then
+        cp "$mod" debian/tmp/usr/local/lib/encryptor/
+        chmod 644 "debian/tmp/usr/local/lib/encryptor/$(basename "$mod")"
+        echo "       ✓ Copied $mod → /usr/local/lib/encryptor/"
+    else
+        echo "       ⚠ WARNING: $mod not found — package may be incomplete"
+    fi
+done
 
 # Copy documentation
 echo "[3/8] Installing documentation..."
-cp README.md LICENSE debian/tmp/usr/share/doc/encryptor/
-echo "       ✓ Copied README.md and LICENSE"
+cp README.md LICENSE CHANGELOG.md debian/tmp/usr/share/doc/encryptor/
+echo "       ✓ Copied README.md, LICENSE, CHANGELOG.md"
 
 # Copy additional docs if they exist
 if [[ -d docs ]]; then
     cp docs/*.md debian/tmp/usr/share/doc/encryptor/ 2>/dev/null || true
-    echo "       ✓ Copied docs/*.md (if present)"
+    echo "       ✓ Copied docs/*.md"
 else
     echo "       ⚠ docs/ directory not found (optional)"
 fi

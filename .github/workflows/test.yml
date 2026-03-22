@@ -1,15 +1,167 @@
-name: Basic Checks
+name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main", "master"]
 
 jobs:
-  lint:
+  # ── 1. Bash syntax check ─────────────────────────────────────────────────────
+  syntax:
+    name: Syntax Check (bash -n)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - name: Check script syntax
-      run: |
-        echo "Checking Bash syntax..."
-        bash -n install.sh
-        bash -n encryptor.sh
-        echo "✅ All scripts have valid syntax"
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: |
+          echo "Checking syntax..."
+          bash -n encryptor.sh
+          bash -n install.sh
+          bash -n uninstall.sh
+          bash -n build_deb.sh
+          for f in lib/*.sh; do bash -n "$f"; done
+          echo "✅ All scripts pass syntax check"
+
+  # ── 2. ShellCheck lint ───────────────────────────────────────────────────────
+  shellcheck:
+    name: ShellCheck Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+      - name: Run ShellCheck
+        run: |
+          shellcheck -S warning \
+            encryptor.sh \
+            install.sh \
+            uninstall.sh \
+            build_deb.sh \
+            lib/ui.sh \
+            lib/crypto.sh \
+            lib/certs.sh \
+            lib/audit.sh
+          echo "✅ ShellCheck passed"
+
+  # ── 3. Functional smoke test ─────────────────────────────────────────────────
+  smoke-test:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get install -y openssl coreutils
+
+      - name: Prepare test environment
+        run: |
+          chmod +x encryptor.sh
+          # Point encryptor config to a temp location so tests are isolated
+          export ENCRYPTOR_CONFIG_DIR="$(mktemp -d)"
+          echo "ENCRYPTOR_CONFIG_DIR=$ENCRYPTOR_CONFIG_DIR" >> "$GITHUB_ENV"
+
+      - name: Test --version
+        run: ./encryptor.sh --version | grep -E "^Encryptor v[0-9]"
+
+      - name: Test --help
+        run: ./encryptor.sh --help | grep -i "usage"
+
+      - name: Test AES-256-CBC encrypt + decrypt (batch mode, default)
+        run: |
+          echo "Hello Encryptor CI $(date)" > /tmp/test_plain.txt
+          printf 'SuperSecretTestPassword123!' > /tmp/test.pass
+
+          ./encryptor.sh --encrypt /tmp/test_plain.txt \
+            --algo aes-256-cbc \
+            --pass-file /tmp/test.pass \
+            --output /tmp/test_plain.txt.enc
+
+          ./encryptor.sh --decrypt /tmp/test_plain.txt.enc \
+            --algo aes-256-cbc \
+            --pass-file /tmp/test.pass \
+            --output /tmp/test_plain_recovered.txt
+
+          diff /tmp/test_plain.txt /tmp/test_plain_recovered.txt
+          echo "✅ AES-256-CBC round-trip OK"
+
+      - name: Test SHA-256 sidecar file creation
+        run: |
+          [[ -f /tmp/test_plain.txt.enc.sha256 ]] || { echo "❌ SHA-256 sidecar missing"; exit 1; }
+          sha256sum -c /tmp/test_plain.txt.enc.sha256 --status
+          echo "✅ SHA-256 integrity sidecar OK"
+
+      - name: Test AES-256-CBC encrypt + decrypt (batch mode)
+        run: |
+          echo "CBC test payload" > /tmp/test_cbc.txt
+          printf 'CBCTestPassword' > /tmp/test_cbc.pass
+
+          ./encryptor.sh --encrypt /tmp/test_cbc.txt \
+            --algo aes-256-cbc \
+            --pass-file /tmp/test_cbc.pass \
+            --output /tmp/test_cbc.txt.enc
+
+          ./encryptor.sh --decrypt /tmp/test_cbc.txt.enc \
+            --algo aes-256-cbc \
+            --pass-file /tmp/test_cbc.pass \
+            --output /tmp/test_cbc_recovered.txt
+
+          diff /tmp/test_cbc.txt /tmp/test_cbc_recovered.txt
+          echo "✅ AES-256-CBC round-trip OK"
+
+      - name: Test JSON output mode
+        run: |
+          echo "json test" > /tmp/json_test.txt
+          printf 'JsonPassword' > /tmp/json_test.pass
+
+          result=$(./encryptor.sh --encrypt /tmp/json_test.txt \
+            --algo aes-256-cbc \
+            --pass-file /tmp/json_test.pass \
+            --json)
+
+          echo "$result" | grep '"status":"success"'
+          echo "✅ JSON output mode OK"
+
+      - name: Verify passwords are NOT in process args
+        run: |
+          # Start an encryption in background, check /proc, kill it
+          echo "Process argument test data" > /tmp/proc_test.txt
+          printf 'ProcTestPassword' > /tmp/proc_test.pass
+
+          # Large file so process stays alive long enough to check
+          dd if=/dev/urandom of=/tmp/proc_test_large.txt bs=1M count=50 2>/dev/null
+
+          ./encryptor.sh --encrypt /tmp/proc_test_large.txt \
+            --algo aes-256-cbc \
+            --pass-file /tmp/proc_test.pass &
+          ENC_PID=$!
+
+          sleep 0.5
+
+          # Check that the password does NOT appear in the process cmdline
+          if [[ -f "/proc/$ENC_PID/cmdline" ]]; then
+            if grep -qF "ProcTestPassword" "/proc/$ENC_PID/cmdline" 2>/dev/null; then
+              echo "❌ SECURITY FAILURE: password found in process args!" >&2
+              kill $ENC_PID 2>/dev/null
+              exit 1
+            fi
+            echo "✅ Password NOT in process args (cmdline clean)"
+          fi
+
+          wait $ENC_PID 2>/dev/null || true
+          echo "✅ Process arg security check passed"
+
+  # ── 4. Debian package build ───────────────────────────────────────────────────
+  deb-build:
+    name: Debian Package Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packaging tools
+        run: sudo apt-get install -y fakeroot dpkg-dev
+      - name: Build .deb package
+        run: |
+          chmod +x build_deb.sh
+          ./build_deb.sh
+          ls -lh encryptor_*.deb
+          dpkg --info encryptor_*.deb
+          echo "✅ .deb package built successfully"

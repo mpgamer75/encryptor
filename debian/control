@@ -1,28 +1,29 @@
 Package: encryptor
-Version: 2.0.0-1
+Version: 2.1.0-1
 Architecture: all
 Maintainer: mpgamer75 <mpgamer75@github.com>
-Depends: openssl (>= 1.1.0), bash (>= 4.0)
+Depends: openssl (>= 1.1.1), bash (>= 4.0)
 Recommends: curl, wget, git, coreutils, less
 Section: utils
 Priority: optional
 Homepage: https://github.com/mpgamer75/encryptor
-Description: |
- Advanced file encryption tool with modern symmetric algorithms
- Encryptor is a powerful, user-friendly command-line encryption tool that
- provides security for your files. Built with pure Bash and OpenSSL 3.x,
- it offers modern encryption algorithms with comprehensive certificate
- management and security auditing capabilities.
+Description: Advanced CLI encryption tool with AES-256-GCM, S/MIME, and PKI management
+ Encryptor is an industry-grade command-line encryption tool built on OpenSSL.
+ It provides authenticated encryption, full X.509 PKI management, and a rich
+ interactive TUI — with zero dependencies beyond bash and openssl.
+ .
+ Security highlights in v2.1.0:
+  - AES-256-GCM as default (true AEAD — confidentiality AND integrity)
+  - Passwords never passed on command line (file descriptor pattern)
+  - PBKDF2-HMAC-SHA256 with 600,000 iterations (OWASP 2024)
+  - SHA-256 integrity sidecar files for tamper detection
  .
  Features:
-  - Modern symmetric ciphers: AES-256-CBC/CTR, ChaCha20, Camellia-256, ARIA-256
-  - S/MIME certificate-based asymmetric encryption with AES-256-GCM
-  - X.509 certificate management (Root CA, CSR generation, certificate signing)
-  - Certificate tools: PKCS#12 export, validation, expiration checking
-  - Security audit suite: local system checks and certificate analysis
-  - testssl.sh integration for remote SSL/TLS server scanning
-  - Interactive TUI with color-coded menus and file browser
-  - Comprehensive logging and operation reporting
-  - Secure file deletion with 3-pass overwrite option
-  - PBKDF2 key derivation (100,000 iterations) for password-based encryption
-  - Cross-platform compatibility (Linux, macOS, WSL)
+  - Symmetric: AES-256-GCM (default), AES-256-CBC/CTR, ChaCha20, Camellia, ARIA
+  - Asymmetric: S/MIME with X.509 certificates (AES-256-GCM key wrap)
+  - Full PKI: Root CA creation, CSR generation, signing, PKCS#12 export
+  - Security audit: 8 local checks with score + remote SSL/TLS scanning
+  - Batch/non-interactive mode with JSON output for CI/CD pipelines
+  - Interactive color-coded TUI with spinner and status bar
+  - Secure file deletion (3-pass shred)
+  - Cross-platform: Linux, macOS, WSL
