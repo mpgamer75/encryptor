@@ -19,7 +19,7 @@ jobs:
     name: Lint (bash -n, ShellCheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Syntax check
         run: |
           for f in encryptor.sh install.sh uninstall.sh build_deb.sh build_release.sh lib/*.sh tests/run.sh; do
@@ -43,7 +43,7 @@ jobs:
         # coreutils, whose tools differ from GNU's in corner cases.
         os: [ubuntu-22.04, ubuntu-24.04, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Versions
         run: bash --version | head -n 1 && openssl version && (tail --version | head -n 1)
       - name: Run test suite
@@ -57,7 +57,7 @@ jobs:
     steps:
       - name: Install tools
         run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssl ca-certificates git python3
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Versions
         run: bash --version | head -n 1 && openssl version
       - name: Run test suite
@@ -67,7 +67,7 @@ jobs:
     name: Compatibility — macOS (Homebrew bash + OpenSSL 3)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install tools
         run: brew install bash openssl@3
       - name: Run test suite
@@ -81,7 +81,7 @@ jobs:
     name: Debian package + installer
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build .deb
         run: ./build_deb.sh
       - name: Install the package and run the self-test
@@ -103,7 +103,7 @@ jobs:
     name: Release artifacts (dry run)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build release artifacts
         run: ./build_release.sh
       - name: Check artifacts
@@ -119,7 +119,7 @@ jobs:
     name: Docker image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build (the Dockerfile runs the self-test)
         run: docker build -t encryptor:ci .
       - name: Round trip on a mounted volume, as the invoking user
@@ -147,7 +147,7 @@ jobs:
     steps:
       - name: Install build tools
         run: dnf -y install rpm-build dnf-plugins-core tar gzip
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build the RPM (runs the test suite in %check)
         run: |
           version="$(sed -n 's/^readonly ENCRYPTOR_VERSION="\(.*\)"$/\1/p' encryptor.sh)"
