@@ -24,6 +24,7 @@
 - **No new dependencies, nothing to trust but OpenSSL.** About 4,000 lines of readable Bash on top of the `openssl` binary already on your servers. Works on air-gapped and locked-down hosts.
 - **Recoverable without this tool.** The format is documented and every file can be decrypted with stock `openssl` commands ([docs/FORMAT.md](docs/FORMAT.md)).
 - **Built for automation.** Sub-commands, `--json`, stable exit codes, stdin/stdout, secrets from files/env/stdin — never from arguments.
+- **Memory-hard password protection.** scrypt by default — run by stock OpenSSL with the password delivered through a pipe; PBKDF2 on request for NIST-only policies.
 - **Secrets stay off the disk and out of `ps`.** Passwords and keys reach OpenSSL through anonymous pipes.
 - **A small PKI and an audit included.** Identities, root CA, signing profiles with SANs, PKCS#12, expiry monitoring, and a self-test with known-answer vectors.
 
@@ -75,7 +76,7 @@ encryptor verify -p pass.txt report.pdf.enc # is it intact, is my password right
                         /____/_/
   Authenticated file encryption · X.509 toolkit      v3.0.0
  ──────────────────────────────────────────────────────────────
-  ● OpenSSL 3.0.13   ● AES-256-CTR + HMAC-SHA256   ● PBKDF2 600000
+  ● OpenSSL 3.0.13   ● AES-256-CTR + HMAC-SHA256   ● scrypt
   ● 3 certificate(s) · 2 key(s)   ▲ 1 expiring soon   ● ~/projects
  ──────────────────────────────────────────────────────────────
 
@@ -128,7 +129,7 @@ Full reference: [docs/USAGE.md](docs/USAGE.md) · `encryptor help` · `man encry
 | Container | `ENCRYPTOR/3`: text header (mode, cipher, KDF parameters) + ciphertext + 256-bit tag |
 | Integrity | HMAC-SHA256 over header and ciphertext, verified before decryption (encrypt-then-MAC) |
 | Ciphers | AES-256-CTR (default), ChaCha20, AES-256-CBC, Camellia-256-CBC, ARIA-256-CBC |
-| Password KDF | PBKDF2-HMAC-SHA256, 600,000 iterations (OWASP), random salt, count stored in the file |
+| Password KDF | **scrypt** (N=2^14, r=8, p=5 — memory-hard, an OWASP-listed configuration) sealing a random file key; or PBKDF2-HMAC-SHA256, 600,000 iterations with `--kdf pbkdf2` |
 | Recipients | Random 256-bit file key wrapped per certificate with CMS (RSA-OAEP-SHA256 or ECDH) |
 | Secret handling | `-pass fd:N` pipes; never argv, never temp files; private temp dir (`mktemp`, 0700) |
 | Files created | Mode 0600 (`umask 077`); private keys 0400; state directory 0700 |
@@ -157,17 +158,17 @@ Encryptor is not a replacement for [age](https://age-encryption.org) or GnuPG; i
 | | Encryptor | age | GnuPG |
 |---|---|---|---|
 | Dependencies | Bash + OpenSSL (already installed) | Go binary | GnuPG suite |
-| Password KDF | PBKDF2 (not memory-hard) | scrypt | Iterated + salted S2K |
+| Password KDF | scrypt, 16 MiB (or PBKDF2) | scrypt, larger memory | Iterated + salted S2K |
 | Authenticated | Yes, verified before output | Yes, chunked streaming | Yes (MDC/OCB) |
 | Recipients | **X.509 certificates** (RSA, EC) | X25519, SSH keys, plugins | OpenPGP keys |
-| NIST-approved primitives only | Yes (with AES ciphers) | No (ChaCha20, X25519, scrypt) | Configurable |
+| NIST-approved primitives only | Optional (`--kdf pbkdf2` + AES ciphers) | No (ChaCha20, X25519, scrypt) | Configurable |
 | Decrypt with stock `openssl` | **Yes, documented** | No | No |
 | JSON output / exit codes for CI | Yes | Limited | `--status-fd` |
 | Built-in PKI, expiry report, audit | Yes | No | Key management |
 | Signatures / sender authentication | No | No | Yes |
 | Streaming decryption of huge pipes | Two passes (spools stdin) | Yes | Yes |
 
-Choose **age** when you can install a binary and want memory-hard password hashing or pipe-to-pipe streaming. Choose **Encryptor** when recipients are identified by X.509 certificates, when only approved NIST primitives are acceptable, when nothing may be installed beyond Bash and OpenSSL, or when you need to guarantee recovery with standard tools.
+Choose **age** when you can install a binary and want pipe-to-pipe streaming or a larger scrypt work factor. Choose **Encryptor** when recipients are identified by X.509 certificates, when only approved NIST primitives are acceptable, when nothing may be installed beyond Bash and OpenSSL, or when you need to guarantee recovery with standard tools.
 
 ## Upgrading from 2.x
 
@@ -181,7 +182,8 @@ See [CHANGELOG.md](CHANGELOG.md).
 ## Development
 
 ```bash
-bash tests/run.sh          # 100+ assertions: round trips, tampering, CLI, PKI, legacy, UI smoke
+bash tests/run.sh          # 110+ assertions: round trips, tampering, CLI, PKI, legacy, UI smoke
+./build_release.sh         # version consistency, tests, .deb, tarball, SHA256SUMS → dist/
 shellcheck encryptor.sh lib/*.sh tests/run.sh
 ```
 
@@ -203,4 +205,4 @@ Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report vulner
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2024–2026 mpgamer75.
 
-Encryptor has not been independently audited. It composes standard primitives in a standard way, and the composition is small enough to read in one sitting — please do.
+Encryptor has not had a professional third-party cryptographic audit. It composes standard primitives in a standard way, and the composition is small enough to read in one sitting — please do.

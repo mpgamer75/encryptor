@@ -46,9 +46,11 @@ ciphertext and is verified
 any plaintext is produced, so a wrong password and a modified file are both
 detected and nothing is written.
 .PP
-Password mode derives the key with PBKDF2-HMAC-SHA256 (600,000 iterations by
-default; the count is stored in the file). Recipient mode generates a random
-file key and wraps it for each certificate with CMS (RSA-OAEP or ECDH).
+Password mode generates a random file key and seals it under the password
+with scrypt (N=16384, r=8, p=5; memory-hard), or derives the key with
+PBKDF2-HMAC-SHA256 (600,000 iterations) when \fB\-\-kdf pbkdf2\fR is given.
+Recipient mode generates a random file key and wraps it for each certificate
+with CMS (RSA-OAEP or ECDH). The parameters are stored in the file.
 .PP
 Passwords and keys are passed to
 .BR openssl (1)
@@ -84,8 +86,8 @@ Run the local security audit (self-test, permissions, key protection,
 certificate expiry and strength, legacy files). Exit status 1 if a check fails.
 .TP
 .B selftest
-Run known-answer tests for HMAC-SHA256 and PBKDF2, a round trip and a tamper
-test against the installed OpenSSL.
+Run known-answer tests for HMAC-SHA256, PBKDF2 and the scrypt key envelope,
+round trips and a tamper test against the installed OpenSSL.
 .TP
 .B passgen
 Print a random password of \fILENGTH\fR characters (default 24).
@@ -122,8 +124,13 @@ Passphrase of an encrypted private key.
 One of aes\-256\-ctr (default), chacha20, aes\-256\-cbc, camellia\-256\-cbc,
 aria\-256\-cbc. When decrypting a legacy 2.x file: the cipher it was written with.
 .TP
+\fB\-\-kdf\fR \fINAME\fR
+Password key-derivation function for new files: \fBscrypt\fR (memory-hard;
+the default when the OpenSSL build supports it), \fBpbkdf2\fR (NIST-approved)
+or \fBauto\fR.
+.TP
 \fB\-\-iter\fR \fIN\fR
-PBKDF2 iterations for new files (minimum 100000, default 600000).
+PBKDF2 iterations (minimum 100000, default 600000). Implies \fB\-\-kdf pbkdf2\fR.
 .TP
 \fB\-\-legacy\-iter\fR \fIN\fR
 Iterations of a legacy file: 600000 for 2.1 (default), 100000 for 2.0.
@@ -176,8 +183,11 @@ Interrupted.
 .B ENCRYPTOR_CONFIG_DIR
 State directory (default: $XDG_CONFIG_HOME/encryptor or ~/.config/encryptor).
 .TP
+.B ENCRYPTOR_KDF
+Password KDF for new files: scrypt, pbkdf2 or auto.
+.TP
 .B ENCRYPTOR_PBKDF2_ITER
-Default PBKDF2 iteration count for new files.
+Default PBKDF2 iteration count.
 .TP
 .B ENCRYPTOR_NO_LOG
 Set to 1 to disable the operation log.
@@ -221,8 +231,8 @@ Monitor certificate expiry from cron:
 encryptor certs \-\-json \-\-warn\-days 45 || notify\-admin
 .RE
 .SH SECURITY NOTES
-There is no password recovery. PBKDF2 is not memory-hard: choose a long
-passphrase (\fBencryptor passgen\fR). Recipient mode provides confidentiality
+There is no password recovery. Choose a long passphrase
+(\fBencryptor passgen\fR); scrypt slows guessing but cannot rescue a weak one. Recipient mode provides confidentiality
 and integrity but does not identify the sender. Secure deletion cannot be
 guaranteed on modern storage; use full-disk encryption.
 .SH SEE ALSO

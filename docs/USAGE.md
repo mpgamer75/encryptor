@@ -69,9 +69,14 @@ encryptor encrypt notes.txt                      # → notes.txt.enc, password p
 encryptor encrypt -p pass.txt a.txt b.txt        # several files, same password
 encryptor encrypt -p pass.txt -o out.enc in.dat  # explicit output
 encryptor encrypt -a chacha20 -p pass.txt in.dat # another cipher
+encryptor encrypt --kdf pbkdf2 -p pass.txt in.dat # NIST-approved KDF instead of scrypt
 encryptor encrypt -p pass.txt --shred in.dat     # verify the copy, then delete the original
 ```
 
+- Password-protected files use **scrypt** (memory-hard) by default. `--kdf pbkdf2`
+  (or `ENCRYPTOR_KDF=pbkdf2`) selects PBKDF2-HMAC-SHA256 with 600,000 iterations;
+  `--iter N` sets that count and implies PBKDF2. Decryption needs no option: the
+  file records what was used.
 - An existing output is never overwritten unless `--force` is given (exit 5).
 - Output files are created with mode 0600.
 - A directory is refused with the `tar` one-liner to use instead:
@@ -199,7 +204,7 @@ encryptor selftest         # known-answer tests against the installed OpenSSL
 ```
 
 The audit checks: OpenSSL and Bash versions, the cryptographic self-test,
-cipher availability, the KDF work factor, permissions of the state directory,
+cipher availability, which password KDF new files get, permissions of the state directory,
 private keys and the log, passphrase protection of keys, certificate expiry
 and strength, stale temporary directories, legacy unauthenticated files in the
 current directory, and core-dump settings.
@@ -237,7 +242,7 @@ With `--json`, one object per processed file is written to standard output
 (to standard error when the data itself goes to standard output):
 
 ```json
-{"status":"success","operation":"encrypt","input":"db.sql","output":"db.sql.enc","format":"encryptor/3","mode":"password","algo":"aes-256-ctr","bytes_in":1048576,"bytes_out":1048768,"ms":612}
+{"status":"success","operation":"encrypt","input":"db.sql","output":"db.sql.enc","format":"encryptor/3","mode":"password","algo":"aes-256-ctr","kdf":"scrypt","bytes_in":1048576,"bytes_out":1048929,"ms":412}
 {"status":"error","operation":"decrypt","input":"db.sql.enc","code":3,"error":"Authentication failed: wrong password, or the file has been modified or corrupted."}
 ```
 
@@ -263,7 +268,8 @@ encountered.
 | Variable | Effect |
 |---|---|
 | `ENCRYPTOR_CONFIG_DIR` | State directory (default `$XDG_CONFIG_HOME/encryptor`, i.e. `~/.config/encryptor`) |
-| `ENCRYPTOR_PBKDF2_ITER` | Default iteration count for new files |
+| `ENCRYPTOR_KDF` | Password KDF for new files: `scrypt`, `pbkdf2` or `auto` (default: scrypt when the OpenSSL build supports it) |
+| `ENCRYPTOR_PBKDF2_ITER` | Default PBKDF2 iteration count |
 | `ENCRYPTOR_NO_LOG=1` | Disable the operation log |
 | `NO_COLOR` | Disable colors (`--no-color` does the same) |
 | `ENCRYPTOR_ASCII=1` | Force ASCII glyphs in the UI |
@@ -297,6 +303,11 @@ The private key is not one of the recipients, or its passphrase is wrong.
 **"Could not encrypt the file key for the recipient certificate(s)."**
 The certificate does not permit encryption (for example `keyUsage` is limited
 to signing, or it is a CA certificate). Use an identity certificate.
+
+**"This file uses scrypt, which this OpenSSL build does not support."**
+The file was written with the default KDF and is being opened with LibreSSL
+or a very old OpenSSL. Decrypt it with OpenSSL 1.1.1+ / 3.x, or create files
+for such systems with `--kdf pbkdf2`.
 
 **"Algorithm … is not available in this OpenSSL build."**
 Some builds (LibreSSL, minimal distributions) omit ARIA or Camellia. Use

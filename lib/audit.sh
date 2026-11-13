@@ -44,7 +44,7 @@ audit_run() {
 
     # 3. Engine self-test (known-answer tests + round trip + tamper detection)
     if crypto_selftest; then
-        _audit_add selftest pass "Cryptographic self-test" "HMAC-SHA256 and PBKDF2 known-answer tests, round trip and tamper detection all passed."
+        _audit_add selftest pass "Cryptographic self-test" "HMAC-SHA256, PBKDF2 and scrypt known-answer tests, round trips and tamper detection all passed."
     else
         _audit_add selftest fail "Cryptographic self-test" "$ENC_ERR" "Do not use this installation until this is resolved"
     fi
@@ -57,8 +57,15 @@ audit_run() {
     else _audit_add ciphers fail "Cipher support" "The default cipher $ENC_DEFAULT_CIPHER is not available."; fi
 
     # 5. KDF work factor
-    if (( ENC_DEFAULT_ITER >= 600000 )); then _audit_add kdf pass "Password KDF work factor" "PBKDF2-HMAC-SHA256, ${ENC_DEFAULT_ITER} iterations (OWASP minimum: 600,000)."
-    else _audit_add kdf warn "Password KDF work factor" "PBKDF2 iterations lowered to ${ENC_DEFAULT_ITER} via ENCRYPTOR_PBKDF2_ITER." "Unset ENCRYPTOR_PBKDF2_ITER or use >= 600000"; fi
+    if [[ "$(crypto_resolve_kdf "$ENC_DEFAULT_KDF")" == "scrypt" ]]; then
+        _audit_add kdf pass "Password KDF" "scrypt, N=${ENC_SCRYPT_N} r=${ENC_SCRYPT_R} p=${ENC_SCRYPT_P} — memory-hard (an OWASP-listed configuration)."
+    elif (( ENC_DEFAULT_ITER < 600000 )); then
+        _audit_add kdf warn "Password KDF" "PBKDF2 iterations lowered to ${ENC_DEFAULT_ITER} via ENCRYPTOR_PBKDF2_ITER." "Unset ENCRYPTOR_PBKDF2_ITER or use >= 600000"
+    elif [[ "$ENC_DEFAULT_KDF" == "pbkdf2" ]]; then
+        _audit_add kdf pass "Password KDF" "PBKDF2-HMAC-SHA256, ${ENC_DEFAULT_ITER} iterations (selected by ENCRYPTOR_KDF; OWASP minimum 600,000)."
+    else
+        _audit_add kdf warn "Password KDF" "This OpenSSL build cannot seal keys with scrypt; falling back to PBKDF2 (${ENC_DEFAULT_ITER} iterations, not memory-hard)." "Upgrade OpenSSL (1.1.1+ / 3.x) and use long passphrases"
+    fi
 
     # 6. State directory permissions
     local mode; mode=$(get_file_mode "$CONFIG_DIR")

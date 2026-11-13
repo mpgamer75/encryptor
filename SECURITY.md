@@ -60,7 +60,14 @@ recipient fingerprints are visible).
 New files use the ENCRYPTOR/3 format (docs/FORMAT.md): cipher + HMAC-SHA256,
 encrypt-then-MAC, independent subkeys. The tag covers the header and the
 ciphertext and is verified before decryption. Cipher, MAC and KDF names read
-from a file are checked against allow-lists; iteration counts are bounded.
+from a file are checked against allow-lists; PBKDF2 iteration counts and
+scrypt parameters are bounded before any work is done.
+
+### Password protection
+A random 256-bit file key is sealed under the password with scrypt (memory-
+hard), inside a standard PKCS#8 envelope that stock OpenSSL can open. PBKDF2-
+HMAC-SHA256 (600,000 iterations) is available with `--kdf pbkdf2` for
+environments restricted to NIST-approved algorithms.
 
 ### Secret handling
 - Passwords, derived keys and key passphrases are passed to OpenSSL through
@@ -104,9 +111,12 @@ from a file are checked against allow-lists; iteration counts are bounded.
 
 ## Known limitations
 
-- **PBKDF2 is not memory-hard.** It is the only password KDF the OpenSSL
-  command line can run without exposing the password in process arguments.
-  Use long passphrases (`encryptor passgen`).
+- **Memory-hardness is bounded.** Password files are sealed with scrypt at
+  N=2^14, r=8, p=5 (16 MiB per guess), the strongest setting the OpenSSL
+  command line accepts with the password passed through a pipe. This is an
+  OWASP-listed configuration but weaker than Argon2id or scrypt at N=2^17.
+  With `--kdf pbkdf2` there is no memory-hardness at all. Use long
+  passphrases (`encryptor passgen`).
 - **No sender authentication** in recipient mode, and no signatures.
 - **Whole-file authentication.** Verification is a separate pass before
   decryption; this is not a chunked streaming AEAD.

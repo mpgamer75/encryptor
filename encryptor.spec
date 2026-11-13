@@ -58,7 +58,7 @@ bash tests/run.sh
 - New command-line interface, terminal UI, PKI profiles, audit and test suite
 - Modules installed under /usr/lib/encryptor; no path patching
 
-* Sat Mar 22 2026 mpgamer75 <mpgamer75@github.com> - 2.1.0-1
+* Sun Mar 22 2026 mpgamer75 <mpgamer75@github.com> - 2.1.0-1
 - Critical security fix: password no longer exposed in process args (ps aux)
 - Critical security fix: false AEAD claim corrected for CBC/CTR modes
 - Critical security fix: PKCS#12 export password leak fixed

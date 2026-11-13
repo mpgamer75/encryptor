@@ -18,21 +18,21 @@ be built with the existing architecture.
    new directory. Today: `tar cz DIR | encryptor encrypt -o DIR.tgz.enc -`.
 
 3. **Re-key without re-encrypting** (`encryptor rekey`)
-   Password change or recipient add/remove currently means decrypt + encrypt.
-   Wrapping the master key in the header for *both* modes (password mode would
-   wrap a random master with the PBKDF2 key) makes this a header-only rewrite.
-   Requires a format revision (`ENCRYPTOR/4`); the reader already rejects
-   unknown versions cleanly.
+   scrypt password files and recipient files already keep a random master key
+   in the header (`sealed:` / `wrapped:`). Changing the password or the
+   recipient list only needs that field rewritten and the tag recomputed —
+   no pass over the data. PBKDF2-mode files would still need re-encryption.
 
 4. **Intermediate CAs and revocation**
    `pathlen`-aware intermediate profile, an index of issued serials, CRL
    generation (`openssl ca -gencrl`), and a revocation check before encrypting
    to a recipient.
 
-5. **Optional memory-hard KDF**
+5. **Stronger memory-hardness, opt-in**
+   scrypt is the default but is capped at 16 MiB by the OpenSSL command line.
    When the `argon2` reference CLI is installed (it reads the password from
    stdin), offer `--kdf argon2id` and record the parameters in the header.
-   Stays opt-in so default files remain decryptable with OpenSSL alone.
+   Opt-in only, so default files stay decryptable with OpenSSL alone.
 
 ## Later
 

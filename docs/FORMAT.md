@@ -10,8 +10,8 @@ the `openssl` command.
    wrong password, must be detected before plaintext is released.
 2. **Self-describing.** The file records its own cipher and key-derivation
    parameters. Nothing has to be remembered or guessed at decryption time.
-3. **Standard building blocks only.** PBKDF2-HMAC-SHA256, HMAC-SHA256,
-   `openssl enc`, CMS. No custom primitives.
+3. **Standard building blocks only.** scrypt and PBKDF2-HMAC-SHA256,
+   HMAC-SHA256, `openssl enc`, PKCS#8, CMS. No custom primitives.
 4. **Recoverable.** A file must remain decryptable with stock OpenSSL if this
    tool is unavailable.
 5. **No secret in argv or on disk** during normal operation.
@@ -35,7 +35,39 @@ keys (they are still covered by the tag) and reject a file whose header is
 longer than 64 lines, has a malformed line, or names a cipher, MAC or KDF that
 is not on the allow-list.
 
-### Password mode
+### Password mode — scrypt (default)
+
+```
+mode: password
+cipher: aes-256-ctr
+mac: hmac-sha256
+kdf: scrypt
+sealed: <base64, single line>
+---
+```
+
+`sealed` is a DER-encoded PKCS#8 `EncryptedPrivateKeyInfo` (RFC 5958) using
+PBES2 (RFC 8018) with **scrypt** (RFC 7914) as the key-derivation function and
+AES-256-CBC as the cipher. It is produced by
+
+```
+openssl pkcs8 -topk8 -scrypt -scrypt_N 16384 -scrypt_r 8 -scrypt_p 5 -v2 aes-256-cbc
+```
+
+The private key inside is an X25519 `PrivateKeyInfo` (RFC 8410): the fixed
+16-byte prefix `30 2e 02 01 00 30 05 06 03 2b 65 6e 04 22 04 20` followed by
+32 random bytes. **Those 32 bytes are the master key.** No X25519 operation is
+ever performed: the structure is used only because PKCS#8 is the one place
+where the OpenSSL command line runs scrypt with the password supplied through
+a pipe, and because its encoding has no optional fields, so every OpenSSL
+version produces and parses the same 48 bytes.
+
+The scrypt parameters and salt live inside the structure. Before doing any
+work a reader extracts them (`openssl asn1parse`) and rejects anything outside
+`2 ≤ N ≤ 2^20`, `1 ≤ r ≤ 32`, `1 ≤ p ≤ 64`, or a cipher other than
+AES-256-CBC.
+
+### Password mode — PBKDF2 (`--kdf pbkdf2`)
 
 ```
 mode: password
@@ -68,8 +100,9 @@ lines are informational (they let `inspect` show who can open the file).
 ## Key schedule
 
 ```
-master   = PBKDF2-HMAC-SHA256(password, salt, iter, 32 bytes)      (password mode)
-master   = 32 random bytes                                          (recipient mode)
+master   = 32 random bytes, sealed with scrypt in `sealed`          (password mode, scrypt)
+master   = PBKDF2-HMAC-SHA256(password, salt, iter, 32 bytes)      (password mode, pbkdf2)
+master   = 32 random bytes, wrapped with CMS in `wrapped`           (recipient mode)
 
 body_key = HMAC-SHA256(key = master, msg = "encryptor/3 body-encryption")
 mac_key  = HMAC-SHA256(key = master, msg = "encryptor/3 authentication")
@@ -106,15 +139,21 @@ characters.
 ## Decryption procedure
 
 1. Parse and validate the header (strict grammar and allow-lists).
-2. Obtain `master` (PBKDF2, or CMS-decrypt `wrapped` with the private key).
+2. Obtain `master` (open `sealed` with the password, or run PBKDF2, or
+   CMS-decrypt `wrapped` with the private key).
 3. Derive `body_key` and `mac_key`.
 4. Compute the tag over `file[0 .. size-64)` and compare it with the stored
    tag. **Stop on mismatch** — nothing is written.
 5. Decrypt `file[header_length .. size-64)` with `openssl enc -d`.
 
-A wrong password yields a different `master`, hence a different `mac_key`, so
-step 4 fails: "wrong password" and "modified file" are deliberately
-indistinguishable.
+A wrong password either fails to open `sealed` (step 2) or yields a different
+`master`, hence a different `mac_key`, so step 4 fails: "wrong password" and
+"modified file" are deliberately reported the same way.
+
+The integrity of `sealed` itself needs no separate protection: it sits in the
+authenticated header, and an attacker cannot construct an envelope that opens
+under a password they do not know to a key of their choosing. Any change to it
+makes step 2 or step 4 fail.
 
 ## Security properties and limits
 
@@ -126,11 +165,19 @@ indistinguishable.
 - The tag is checked once, over the whole file: decryption needs two passes
   and input from a pipe is spooled to a private temporary file (ciphertext
   only). This is not a chunked streaming AEAD.
-- PBKDF2 is not memory-hard. Password strength matters; use a long passphrase.
+- scrypt at N=2^14, r=8, p=5 costs 16 MiB of memory per password guess. That
+  is the largest N the OpenSSL command line accepts for PKCS#8 (it caps scrypt
+  memory at 32 MiB); p=5 supplies the rest of the work, and the combination is
+  one of the equivalent configurations listed by OWASP. It is memory-hard, but
+  less so than Argon2id or scrypt with N=2^17. Password strength still matters.
+- With `--kdf pbkdf2` there is no memory-hardness; use it when only
+  NIST-approved primitives are acceptable.
 - Recipient mode does not authenticate the sender: anyone holding the
   certificate can create a valid file for its owner.
-- The 8-byte PBKDF2 salt is the size `openssl enc` supports on every OpenSSL
-  version; it prevents precomputation and makes the master key unique per file.
+- In PBKDF2 mode the 8-byte salt is the size `openssl enc` supports on every
+  OpenSSL version; it prevents precomputation and makes the master key unique
+  per file. In scrypt mode the master key is random and the salt is generated
+  by OpenSSL inside the envelope.
 
 ## Recovery with stock OpenSSL
 
@@ -148,9 +195,14 @@ iter=$(sed -n '/^---$/q; s/^iter: //p' "$f")
 cipher=$(sed -n '/^---$/q; s/^cipher: //p' "$f")
 size=$(wc -c < "$f" | tr -d ' ')
 
-# master key (password mode)
-master=$(openssl enc -aes-256-ctr -pbkdf2 -iter "$iter" -md sha256 -S "$salt" -P -pass "pass:$PW" \
-         | sed -n 's/^key=//p' | tr 'A-F' 'a-f')
+# master key — "kdf: scrypt" files (the default)
+master=$(sed -n '/^---$/q; s/^sealed: //p' "$f" | openssl base64 -d -A \
+         | openssl pkcs8 -inform DER -topk8 -nocrypt -outform DER -passin "pass:$PW" \
+         | tail -c 32 | od -An -v -tx1 | tr -d ' \n')
+
+# master key — "kdf: pbkdf2-hmac-sha256" files: use this line instead
+# master=$(openssl enc -aes-256-ctr -pbkdf2 -iter "$iter" -md sha256 -S "$salt" -P -pass "pass:$PW" \
+#          | sed -n 's/^key=//p' | tr 'A-F' 'a-f')
 
 body_key=$(printf '%s' 'encryptor/3 body-encryption' | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$master" -r | cut -d' ' -f1)
 mac_key=$(printf '%s' 'encryptor/3 authentication'  | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$master" -r | cut -d' ' -f1)
@@ -171,8 +223,8 @@ master=$(sed -n '/^---$/q; s/^wrapped: //p' "$f" | openssl base64 -d -A \
          | openssl cms -decrypt -binary -inform DER -inkey my.key)
 ```
 
-This recipe is executed by the test suite (`tests/run.sh`), so it cannot
-silently go stale.
+Both password variants of this recipe are executed by the test suite
+(`tests/run.sh`), so they cannot silently go stale.
 
 ## Legacy formats (read-only)
 

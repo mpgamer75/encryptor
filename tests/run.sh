@@ -61,8 +61,16 @@ for c in aes-256-ctr chacha20 aes-256-cbc camellia-256-cbc aria-256-cbc; do
         ok "round trip $c"
     else bad "round trip $c"; fi
 done
-check "default work factor (600k) round trip" bash -c "bash '$ENC' encrypt -q -p pass -o d.enc plain.txt && bash '$ENC' decrypt -q -p pass -o d.out d.enc && cmp -s plain.txt d.out"
-check "header records 600000 iterations"      grep -q '^iter: 600000$' d.enc
+check "default settings round trip"            bash -c "bash '$ENC' encrypt -q -p pass -o d.enc plain.txt && bash '$ENC' decrypt -q -p pass -o d.out d.enc && cmp -s plain.txt d.out"
+if openssl version | grep -q '^OpenSSL'; then
+    check "default KDF is scrypt (memory-hard)" grep -aq '^kdf: scrypt$' d.enc
+    check "inspect reports the scrypt cost"     bash -c "bash '$ENC' inspect --json d.enc | grep -q '\"kdf\":\"scrypt\",\"scrypt_n\":16384,\"scrypt_r\":8,\"scrypt_p\":5'"
+fi
+check "--kdf pbkdf2 round trip at 600k"        bash -c "bash '$ENC' encrypt -q --kdf pbkdf2 -p pass -o dp.enc plain.txt && bash '$ENC' decrypt -q -p pass -o dp.out dp.enc && cmp -s plain.txt dp.out"
+check "PBKDF2 header records 600000 iterations" grep -aq '^iter: 600000$' dp.enc
+check "ENCRYPTOR_KDF=pbkdf2 selects PBKDF2"    bash -c "ENCRYPTOR_KDF=pbkdf2 bash '$ENC' encrypt -q -p pass -o de.enc plain.txt && grep -aq '^kdf: pbkdf2-hmac-sha256$' de.enc"
+check_rc 2 "unknown --kdf is refused"          enc encrypt --kdf argon -p pass -o dk.enc plain.txt
+check_rc 2 "--iter with --kdf scrypt is refused" enc encrypt --kdf scrypt --iter 200000 -p pass -o dk.enc plain.txt
 check "empty file round trip"                 bash -c "bash '$ENC' encrypt ${FAST[*]} -q -p pass empty.dat && bash '$ENC' decrypt -q -p pass -o empty.out empty.dat.enc && cmp -s empty.dat empty.out"
 cp plain.txt 'we ird "name" $x.txt'
 check "file name with spaces/quotes"          bash -c "bash '$ENC' encrypt ${FAST[*]} -q -p pass 'we ird \"name\" \$x.txt' && bash '$ENC' decrypt -q -p pass -o w.out 'we ird \"name\" \$x.txt.enc' && cmp -s plain.txt w.out"
@@ -97,6 +105,22 @@ printf 'ENCRYPTOR/3\nmode: password\ncipher: none\nmac: hmac-sha256\n---\n' > t-
 check_rc 6 "header naming a non-allow-listed cipher is refused" enc decrypt -p pass -o n.out t-none.enc
 printf 'ENCRYPTOR/9\n---\n' > t-future.enc
 check_rc 6 "future format version is refused"      enc decrypt -p pass -o f.out t-future.enc
+# scrypt-sealed files: same guarantees.
+if grep -aq '^kdf: scrypt$' d.enc; then
+    enc encrypt -q -p pass -o sc.enc random.bin
+    check_rc 3 "scrypt: wrong password is rejected"    enc decrypt -p badpass -o sc1.out sc.enc
+    check      "scrypt: nothing written on wrong password" test ! -e sc1.out
+    ssize=$(wc -c < sc.enc | tr -d ' ')
+    { head -c $(( ssize / 2 )) sc.enc; printf '\001'; tail -c $(( ssize - ssize / 2 - 1 )) sc.enc; } > sc-body.enc
+    check_rc 3 "scrypt: modified ciphertext is rejected" enc decrypt -p pass -o sc2.out sc-body.enc
+    # Corrupt one character inside the sealed key envelope.
+    sed '1,/^---$/ s/^\(sealed: .\{60\}\)./\1A/' sc.enc > sc-seal.enc
+    if cmp -s sc.enc sc-seal.enc; then sed '1,/^---$/ s/^\(sealed: .\{60\}\)./\1B/' sc.enc > sc-seal.enc; fi
+    rc=0; enc decrypt -p pass -o sc3.out sc-seal.enc >/dev/null 2>&1 || rc=$?
+    if [[ $rc -eq 3 || $rc -eq 6 ]] && [[ ! -e sc3.out ]]; then ok "scrypt: modified key envelope is rejected"; else bad "scrypt: modified key envelope is rejected" "exit $rc"; fi
+    printf 'ENCRYPTOR/3\nmode: password\ncipher: aes-256-ctr\nmac: hmac-sha256\nkdf: scrypt\nsealed: AAAA\n---\n%0200d' 0 > sc-junk.enc
+    check_rc 6 "scrypt: malformed key envelope is refused" enc decrypt -p pass -o sc4.out sc-junk.enc
+fi
 check      "no partial files left behind"          bash -c "! ls | grep -q encryptor-part"
 
 # ------------------------------------------------------------------------------
@@ -209,6 +233,45 @@ check "TLS scan targets cannot be option-injected"  unit t_targets
 t_pwbits() { (( $(crypto_password_bits "abc") < 45 )) && (( $(crypto_password_bits "correct horse battery staple") > 90 )); }
 check "password strength estimate"                  unit t_pwbits
 check "passgen length and alphabet"                 bash -c "[[ \$(bash '$ENC' passgen 32) =~ ^[A-Za-z0-9]{32}\$ ]]"
+
+t_scrypt() {
+    crypto_scrypt_available || return 0
+    [[ "$(_crypto_sealed_params "$CRYPTO_KAT_SCRYPT_SEALED")" == "1024:8:1" ]] || return 1
+    [[ "$(_crypto_unseal_master "$CRYPTO_KAT_SCRYPT_SEALED" "encryptor-selftest")" == "$CRYPTO_KAT_SCRYPT_MASTER" ]] || return 2
+    ! _crypto_unseal_master "$CRYPTO_KAT_SCRYPT_SEALED" "wrong" >/dev/null || return 3
+    # Seal/unseal round trip with the production cost.
+    local m b; m=$(openssl rand -hex 32)
+    b=$(_crypto_seal_master "$m" "pw with spaces") || return 4
+    [[ "$(_crypto_sealed_params "$b")" == "16384:8:5" ]] || return 5
+    [[ "$(_crypto_unseal_master "$b" "pw with spaces")" == "$m" ]] || return 6
+    # Out-of-range work factors must be refused before any derivation.
+    local fmt big
+    fmt=$(_crypto_hex_fmt "${ENC_SEAL_PREFIX}${m}")
+    # shellcheck disable=SC2059
+    big=$(printf "$fmt" | openssl pkcs8 -topk8 -inform DER -outform DER -scrypt -scrypt_N 16 -scrypt_r 1 -scrypt_p 200 -passout pass:x 2>/dev/null | openssl base64 -A)
+    [[ -n "$big" ]] || return 7
+    ! _crypto_sealed_params "$big" >/dev/null || return 8
+    ! _crypto_sealed_params "AAAA" >/dev/null || return 9
+    ! _crypto_sealed_params "" >/dev/null || return 10
+}
+if unit t_scrypt; then ok "scrypt envelope: fixed vector, round trip, parameter bounds"; else bad "scrypt envelope: fixed vector, round trip, parameter bounds" "step $?"; fi
+
+# The same, for a scrypt-sealed file.
+recover_scrypt() {
+    local f="$1" pw="$2" hdr_len cipher master ek mk size
+    hdr_len=$(LC_ALL=C awk '{ n += length($0) + 1 } /^---$/ { print n; exit }' "$f")
+    cipher=$(sed -n '/^---$/q; s/^cipher: //p' "$f")
+    master=$(sed -n '/^---$/q; s/^sealed: //p' "$f" | openssl base64 -d -A \
+             | openssl pkcs8 -inform DER -topk8 -nocrypt -outform DER -passin "pass:$pw" | tail -c 32 | od -An -v -tx1 | tr -d ' \n')
+    ek=$(printf '%s' 'encryptor/3 body-encryption' | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$master" -r | cut -d' ' -f1)
+    mk=$(printf '%s' 'encryptor/3 authentication'  | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$master" -r | cut -d' ' -f1)
+    size=$(wc -c < "$f" | tr -d ' ')
+    [[ "$(head -c $(( size - 64 )) "$f" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$mk" -r | cut -d' ' -f1)" == "$(tail -c 64 "$f")" ]] || return 1
+    head -c $(( size - 64 )) "$f" | tail -c "+$(( hdr_len + 1 ))" | openssl enc -d "-$cipher" -pbkdf2 -iter 1 -md sha256 -pass "pass:$ek"
+}
+if [[ -f sc.enc ]]; then
+    check "documented openssl-only recovery works for scrypt files" bash -c "$(declare -f recover_scrypt); recover_scrypt sc.enc secret-pass | cmp -s - random.bin"
+fi
 
 # The documented recovery recipe (docs/FORMAT.md) using nothing but openssl.
 recover() {

@@ -37,7 +37,9 @@ ${BOLD}ENCRYPT / DECRYPT OPTIONS${RESET}
       --key-pass-file FILE Passphrase of an encrypted private key
   -a, --algo CIPHER        ${ENC_CIPHER_IDS[*]}
                            (default ${ENC_DEFAULT_CIPHER}; for legacy 2.x files: the cipher used)
-      --iter N             PBKDF2 iterations for new files (default ${ENC_DEFAULT_ITER})
+      --kdf NAME           Password KDF for new files: scrypt (memory-hard, default when
+                           supported), pbkdf2 (NIST-approved), auto
+      --iter N             PBKDF2 iterations with --kdf pbkdf2 (default ${ENC_DEFAULT_ITER})
       --legacy-iter N      Iterations of a legacy file (2.1: 600000, 2.0: 100000)
   -f, --force              Overwrite an existing output file
       --shred              After a verified encryption, overwrite and delete the input
@@ -59,9 +61,10 @@ ${BOLD}EXAMPLES${RESET}
 ${BOLD}FORMAT${RESET}
   New files use the self-describing ENCRYPTOR/3 container: cipher + HMAC-SHA256
   (encrypt-then-MAC). The tag covers the header and all ciphertext and is
-  verified before any plaintext is written. Keys: PBKDF2-HMAC-SHA256 from a
-  password, or a random file key wrapped for each certificate recipient (CMS,
-  RSA-OAEP or ECDH). Files written by Encryptor 2.x are still decrypted.
+  verified before any plaintext is written. Keys: a random file key sealed
+  with scrypt (or derived with PBKDF2-HMAC-SHA256) from a password, or wrapped
+  for each certificate recipient (CMS, RSA-OAEP or ECDH). Files written by
+  Encryptor 2.x are still decrypted.
   Specification and a recovery recipe using only openssl: docs/FORMAT.md
 
 ${BOLD}EXIT STATUS${RESET}
@@ -72,7 +75,8 @@ ${BOLD}EXIT STATUS${RESET}
 ${BOLD}FILES${RESET}
   ${CONFIG_DIR}/certs/           certificates and private keys
   ${CONFIG_DIR}/encryptor.log    operation log (ENCRYPTOR_NO_LOG=1 disables)
-  Environment: ENCRYPTOR_CONFIG_DIR, ENCRYPTOR_PBKDF2_ITER, ENCRYPTOR_NO_LOG, NO_COLOR
+  Environment: ENCRYPTOR_CONFIG_DIR, ENCRYPTOR_KDF, ENCRYPTOR_PBKDF2_ITER,
+               ENCRYPTOR_NO_LOG, NO_COLOR
 EOF
 }
 
@@ -140,9 +144,11 @@ _cli_load_password() {
 }
 
 # --- JSON result lines -------------------------------------------------------
-_cli_json_ok() {    # op input output
-    printf '{"status":"success","operation":"%s","input":"%s","output":"%s","format":"%s","mode":"%s","algo":"%s","bytes_in":%d,"bytes_out":%d,"ms":%d}\n' \
-        "$1" "$(json_escape "$2")" "$(json_escape "$3")" "$4" "$5" "$6" "$7" "$8" "$9"
+_cli_json_ok() {    # op input output format mode algo bytes_in bytes_out ms [kdf]
+    local kdf=""
+    [[ -n "${10:-}" ]] && kdf=",\"kdf\":\"${10}\""
+    printf '{"status":"success","operation":"%s","input":"%s","output":"%s","format":"%s","mode":"%s","algo":"%s"%s,"bytes_in":%d,"bytes_out":%d,"ms":%d}\n' \
+        "$1" "$(json_escape "$2")" "$(json_escape "$3")" "$4" "$5" "$6" "$kdf" "$7" "$8" "$9"
 }
 _cli_json_err() {   # op input code message
     printf '{"status":"error","operation":"%s","input":"%s","code":%d,"error":"%s"}\n' \
@@ -158,7 +164,7 @@ _cli_format_name() {
 
 # --- encrypt -----------------------------------------------------------------
 cli_encrypt() {
-    local output="" algo="$ENC_DEFAULT_CIPHER" iter="$ENC_DEFAULT_ITER" force=0 shred=0
+    local output="" algo="$ENC_DEFAULT_CIPHER" iter="$ENC_DEFAULT_ITER" force=0 shred=0 kdf="" iter_given=0
     local -a files=() recipients=()
     CLI_PASS_FILE=""; CLI_PASS_ENV=""; CLI_PASS_STDIN=0
     while [[ $# -gt 0 ]]; do
@@ -169,7 +175,8 @@ cli_encrypt() {
             --pass-stdin)    CLI_PASS_STDIN=1; shift ;;
             -r|--recipient|--cert) _cli_need_arg "$@"; recipients+=("$2"); shift 2 ;;
             -a|--algo)       _cli_need_arg "$@"; algo="${2,,}"; shift 2 ;;
-            --iter)          _cli_need_arg "$@"; iter="$2"; shift 2 ;;
+            --iter)          _cli_need_arg "$@"; iter="$2"; iter_given=1; shift 2 ;;
+            --kdf)           _cli_need_arg "$@"; kdf="${2,,}"; shift 2 ;;
             -f|--force)      force=1; shift ;;
             --shred)         shred=1; shift ;;
             --json)          CLI_JSON=1; shift ;;
@@ -187,6 +194,12 @@ cli_encrypt() {
     fi
     (( ${#files[@]} > 0 )) || _cli_usage_error "encrypt: no input file"
     crypto_is_cipher "$algo" || _cli_usage_error "unknown algorithm '$algo' (valid: ${ENC_CIPHER_IDS[*]})"
+    case "$kdf" in
+        "")                 kdf="$ENC_DEFAULT_KDF"; (( iter_given )) && kdf="pbkdf2" ;;   # --iter implies PBKDF2
+        scrypt|pbkdf2|auto) ;;
+        *)                  _cli_usage_error "unknown KDF '$kdf' (valid: scrypt pbkdf2 auto)" ;;
+    esac
+    if (( iter_given )) && [[ "$kdf" == "scrypt" ]]; then _cli_usage_error "--iter applies to --kdf pbkdf2 only"; fi
     if [[ -n "$output" ]] && (( ${#files[@]} > 1 )); then _cli_usage_error "--output can only be used with a single input"; fi
     if (( CLI_PASS_STDIN )); then
         local f; for f in "${files[@]}"; do [[ "$f" == "-" ]] && _cli_usage_error "--pass-stdin cannot be combined with input from stdin"; done
@@ -218,7 +231,7 @@ cli_encrypt() {
             ENC_ERR="Output already exists: $out (use --force to overwrite)"; rc=$EX_CANTCREAT
         else
             t0=$(now_ms)
-            crypto_encrypt "$in" "$out" "$algo" "$iter"; rc=$?
+            crypto_encrypt "$in" "$out" "$algo" "$iter" "$kdf"; rc=$?
             t1=$(now_ms)
         fi
 
@@ -226,9 +239,11 @@ cli_encrypt() {
             log_operation "SUCCESS" "Encrypted: $in → $out (cipher=$algo, mode=$mode)"
             local stream=1; [[ "$out" == "-" ]] && stream=2
             if (( CLI_JSON )); then
-                _cli_json_ok encrypt "$in" "$out" "encryptor/3" "$mode" "$algo" "$ENC_RESULT_BYTES_IN" "$ENC_RESULT_BYTES_OUT" "$(( t1 - t0 ))" >&$stream
+                local used_kdf=""; [[ "$mode" == "password" ]] && used_kdf="$ENC_RESULT_KDF"
+                _cli_json_ok encrypt "$in" "$out" "encryptor/3" "$mode" "$algo" "$ENC_RESULT_BYTES_IN" "$ENC_RESULT_BYTES_OUT" "$(( t1 - t0 ))" "$used_kdf" >&$stream
             elif (( ! CLI_QUIET )); then
-                printf 'Encrypted: %s %s %s (%s, %s, %d ms)\n' "$in" "$G_ARROW" "$out" "$algo+hmac-sha256" "$mode" "$(( t1 - t0 ))" >&$stream
+                local how="$mode"; [[ "$mode" == "password" ]] && how="password/$ENC_RESULT_KDF"
+                printf 'Encrypted: %s %s %s (%s, %s, %d ms)\n' "$in" "$G_ARROW" "$out" "$algo+hmac-sha256" "$how" "$(( t1 - t0 ))" >&$stream
             fi
             if (( shred )) && [[ "$in" != "-" && "$out" != "-" ]]; then
                 local vrc=0
@@ -394,7 +409,12 @@ cli_inspect() {
             printf ',"authenticated":true,"mode":"%s","cipher":"%s","mac":"%s","payload_bytes":%d' \
                 "${ENC_META[mode]}" "${ENC_META[cipher]}" "${ENC_META[mac]}" "${ENC_META[body_len]}"
             if [[ "${ENC_META[mode]}" == password ]]; then
-                printf ',"kdf":"%s","iterations":%d' "${ENC_META[kdf]}" "${ENC_META[iter]}"
+                if [[ "${ENC_META[kdf]}" == "scrypt" ]]; then
+                    local sn sr sp; IFS=: read -r sn sr sp <<<"${ENC_META[scrypt]}"
+                    printf ',"kdf":"scrypt","scrypt_n":%d,"scrypt_r":%d,"scrypt_p":%d' "$sn" "$sr" "$sp"
+                else
+                    printf ',"kdf":"%s","iterations":%d' "${ENC_META[kdf]}" "${ENC_META[iter]}"
+                fi
             else
                 local fp first=1
                 printf ',"keywrap":"cms","recipients":['
@@ -416,7 +436,7 @@ cli_inspect() {
                 printf 'Format:      ENCRYPTOR/3 (authenticated, encrypt-then-MAC)\n'
                 printf 'Cipher:      %s\n' "${ENC_CIPHER_LABEL[${ENC_META[cipher]}]}"
                 if [[ "${ENC_META[mode]}" == password ]]; then
-                    printf 'Key:         password, PBKDF2-HMAC-SHA256, %s iterations\n' "${ENC_META[iter]}"
+                    printf 'Key:         password, %s\n' "$(crypto_meta_kdf_label)"
                 else
                     printf 'Key:         %d certificate recipient(s), CMS key wrap\n' "${#ENC_META_RCPT[@]}"
                     local fp; for fp in "${ENC_META_RCPT[@]:-}"; do [[ -n "$fp" ]] && printf '  recipient: sha256:%s\n' "$fp"; done
@@ -468,7 +488,7 @@ cli_certs() {
 cli_selftest() {
     core_probe_openssl
     if crypto_selftest; then
-        printf '%s%s%s Self-test passed (%s): HMAC-SHA256 KAT, PBKDF2 KAT, round trip, tamper detection.\n' "$C_OK" "$G_OK" "$RESET" "$OPENSSL_VERSION_TEXT"
+        printf '%s%s%s Self-test passed (%s): HMAC-SHA256, PBKDF2 and scrypt known answers, round trips, tamper detection.\n' "$C_OK" "$G_OK" "$RESET" "$OPENSSL_VERSION_TEXT"
         exit 0
     fi
     _cli_err "self-test FAILED: $ENC_ERR"
@@ -508,11 +528,12 @@ _encryptor() {
     case "$prev" in
         -a|--algo) COMPREPLY=( $(compgen -W "aes-256-ctr chacha20 aes-256-cbc camellia-256-cbc aria-256-cbc" -- "$cur") ); return ;;
         --pass-env) COMPREPLY=( $(compgen -v -- "$cur") ); return ;;
+        --kdf) COMPREPLY=( $(compgen -W "scrypt pbkdf2 auto" -- "$cur") ); return ;;
         --iter|--legacy-iter|--warn-days) return ;;
     esac
     if [[ "$cur" == -* ]]; then
         case "$cmd" in
-            encrypt) COMPREPLY=( $(compgen -W "--output --pass-file --pass-env --pass-stdin --recipient --algo --iter --force --shred --json --quiet --no-color" -- "$cur") ) ;;
+            encrypt) COMPREPLY=( $(compgen -W "--output --pass-file --pass-env --pass-stdin --recipient --algo --kdf --iter --force --shred --json --quiet --no-color" -- "$cur") ) ;;
             decrypt|verify) COMPREPLY=( $(compgen -W "--output --pass-file --pass-env --pass-stdin --key --cert --key-pass-file --algo --legacy-iter --force --json --quiet --no-color" -- "$cur") ) ;;
             inspect|audit) COMPREPLY=( $(compgen -W "--json" -- "$cur") ) ;;
             certs) COMPREPLY=( $(compgen -W "--json --warn-days" -- "$cur") ) ;;

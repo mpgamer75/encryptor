@@ -44,6 +44,24 @@ if [[ "${ENCRYPTOR_PBKDF2_ITER:-}" =~ ^[0-9]+$ ]]; then
     ENC_DEFAULT_ITER=$ENCRYPTOR_PBKDF2_ITER
 fi
 
+# Password KDF selection: scrypt (memory-hard) | pbkdf2 (NIST-approved) | auto.
+# "auto" uses scrypt when this OpenSSL build supports it, otherwise PBKDF2.
+ENC_DEFAULT_KDF="auto"
+case "${ENCRYPTOR_KDF:-}" in scrypt|pbkdf2|auto) ENC_DEFAULT_KDF="$ENCRYPTOR_KDF" ;; esac
+
+# scrypt cost: N=2^14, r=8, p=5 — one of the equivalent configurations in the
+# OWASP Password Storage Cheat Sheet. 16 MiB of memory per guess; it is also
+# the largest N the OpenSSL command line accepts (its PKCS#8 code caps scrypt
+# memory at 32 MiB), so p carries the remaining work.
+readonly ENC_SCRYPT_N=16384 ENC_SCRYPT_R=8 ENC_SCRYPT_P=5
+# Bounds enforced on parameters read from a file before any work is done.
+readonly ENC_SCRYPT_MAX_N=1048576 ENC_SCRYPT_MAX_R=32 ENC_SCRYPT_MAX_P=64
+# DER PrivateKeyInfo header of an X25519 key (RFC 8410); the 32 bytes that
+# follow are the master key. Used only as a standard container for sealing.
+readonly ENC_SEAL_PREFIX="302e020100300506032b656e04220420"
+readonly CRYPTO_KAT_SCRYPT_SEALED="MIGTME8GCSqGSIb3DQEFDTBCMCEGCSsGAQQB2kcECzAUBAjoyR3s99viigICBAACAQgCAQEwHQYJYIZIAWUDBAEqBBBU8Qfl5ju7WmkxHqLyteSCBED9l6fp28DBgaHrLoEzeJJz1XC99I0gy+an7JY4mtltBIYICBnVYDNCBORl3imPjhDqGgClYcVcljagCdu9+HNb"
+readonly CRYPTO_KAT_SCRYPT_MASTER="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+
 # Cipher registry. Every cipher is combined with HMAC-SHA256 (encrypt-then-MAC),
 # so all of them yield authenticated encryption inside the v3 container.
 readonly -a ENC_CIPHER_IDS=(aes-256-ctr chacha20 aes-256-cbc camellia-256-cbc aria-256-cbc)
@@ -76,6 +94,7 @@ declare -A ENC_META=()       # parsed container metadata (crypto_inspect)
 declare -a ENC_META_RCPT=()  # recipient certificate fingerprints
 ENC_RESULT_BYTES_IN=0
 ENC_RESULT_BYTES_OUT=0
+ENC_RESULT_KDF=""            # KDF actually used by the last password-mode encryption
 
 crypto_reset_inputs() {
     ENC_SECRET=""; ENC_RECIPIENTS=(); ENC_KEY_FILE=""; ENC_CERT_FILE=""
@@ -172,6 +191,106 @@ _crypto_pbkdf2() {
     key=${key,,}
     [[ "$key" =~ ^[0-9a-f]{64}$ ]] || return 1
     printf '%s' "$key"
+}
+
+# --- scrypt-sealed master key -------------------------------------------------
+# The OpenSSL command line can run scrypt with the password supplied through a
+# pipe in exactly one place: PKCS#8 private-key encryption (PBES2 with scrypt,
+# RFC 7914 / RFC 8018). We therefore store a random 256-bit master key inside
+# a standard X25519 PrivateKeyInfo and let `openssl pkcs8` seal it with
+# scrypt + AES-256-CBC. No X25519 operation is ever performed; the structure
+# is only a well-specified envelope that stock OpenSSL can open.
+
+# Hex string → printf format of \xHH escapes (for binary output via a builtin).
+_crypto_hex_fmt() {
+    local hex="$1" i out=""
+    for (( i = 0; i < ${#hex}; i += 2 )); do out+="\\x${hex:i:2}"; done
+    printf '%s' "$out"
+}
+
+# Does this OpenSSL build support scrypt-sealed PKCS#8 with X25519? (cached)
+_CRYPTO_SCRYPT_OK=""
+crypto_scrypt_available() {
+    if [[ -z "$_CRYPTO_SCRYPT_OK" ]]; then
+        local fmt n
+        fmt=$(_crypto_hex_fmt "${ENC_SEAL_PREFIX}${CRYPTO_KAT_SCRYPT_MASTER}")
+        # "probe" is a constant, not a secret.
+        # shellcheck disable=SC2059
+        n=$(printf "$fmt" | openssl pkcs8 -topk8 -inform DER -outform DER -scrypt \
+                -scrypt_N 16 -scrypt_r 1 -scrypt_p 1 -passout pass:probe 2>/dev/null | wc -c)
+        if [[ "${n//[[:space:]]/}" -gt 100 ]]; then _CRYPTO_SCRYPT_OK=yes; else _CRYPTO_SCRYPT_OK=no; fi
+    fi
+    [[ "$_CRYPTO_SCRYPT_OK" == yes ]]
+}
+
+# Resolve a requested KDF name (scrypt | pbkdf2 | auto) to the one to use.
+crypto_resolve_kdf() {
+    case "${1:-auto}" in
+        pbkdf2) printf 'pbkdf2' ;;
+        scrypt) printf 'scrypt' ;;
+        *)      if crypto_scrypt_available; then printf 'scrypt'; else printf 'pbkdf2'; fi ;;
+    esac
+}
+
+# Seal a master key under a password → base64 PKCS#8 EncryptedPrivateKeyInfo.
+_crypto_seal_master() {
+    local master="$1" password="$2" fmt b64
+    fmt=$(_crypto_hex_fmt "${ENC_SEAL_PREFIX}${master}")
+    # shellcheck disable=SC2059
+    b64=$(printf "$fmt" | openssl pkcs8 -topk8 -inform DER -outform DER -scrypt \
+            -scrypt_N "$ENC_SCRYPT_N" -scrypt_r "$ENC_SCRYPT_R" -scrypt_p "$ENC_SCRYPT_P" -v2 aes-256-cbc \
+            -passout fd:3 3< <(printf '%s\n' "$password") 2>/dev/null | openssl base64 -A 2>/dev/null)
+    [[ ${#b64} -ge 150 ]] || return 1
+    printf '%s' "$b64"
+}
+
+# Read and bound-check the scrypt parameters inside a sealed blob → "N:r:p".
+# Runs before any key derivation so that a crafted file cannot request an
+# arbitrary amount of CPU or memory.
+_crypto_sealed_params() {
+    local b64="$1" dump n r p
+    (( ${#b64} <= 2048 )) || return 1
+    dump=$(printf '%s' "$b64" | openssl base64 -d -A 2>/dev/null | openssl asn1parse -inform DER 2>/dev/null) || return 1
+    # The three INTEGERs that follow the scrypt algorithm identifier and its salt.
+    read -r n r p < <(awk '
+        /OBJECT/ && (/:scrypt/ || /1\.3\.6\.1\.4\.1\.11591\.4\.11/) { seen = 1; next }
+        seen && /INTEGER/ { sub(/.*:/, ""); vals[++k] = $0; if (k == 3) { print vals[1], vals[2], vals[3]; exit } }
+    ' <<<"$dump")
+    [[ "$n" =~ ^[0-9A-Fa-f]{1,8}$ && "$r" =~ ^[0-9A-Fa-f]{1,8}$ && "$p" =~ ^[0-9A-Fa-f]{1,8}$ ]] || return 1
+    n=$(( 16#$n )); r=$(( 16#$r )); p=$(( 16#$p ))
+    (( n >= 2 && n <= ENC_SCRYPT_MAX_N && r >= 1 && r <= ENC_SCRYPT_MAX_R && p >= 1 && p <= ENC_SCRYPT_MAX_P )) || return 1
+    grep -q ':aes-256-cbc' <<<"$dump" || return 1
+    printf '%d:%d:%d' "$n" "$r" "$p"
+}
+
+# Open a sealed blob with the password → master key (hex).
+_crypto_unseal_master() {
+    local b64="$1" password="$2" der
+    der=$(printf '%s' "$b64" | openssl base64 -d -A 2>/dev/null \
+          | openssl pkcs8 -inform DER -topk8 -nocrypt -outform DER -passin fd:3 3< <(printf '%s\n' "$password") 2>/dev/null \
+          | od -An -v -tx1 | tr -d ' \n')
+    [[ ${#der} -eq 96 && "${der:0:32}" == "$ENC_SEAL_PREFIX" ]] || return 1
+    printf '%s' "${der:32}"
+}
+
+# Human-readable description of the password KDF recorded in ENC_META.
+crypto_meta_kdf_label() {
+    if [[ "${ENC_META[kdf]:-}" == "scrypt" ]]; then
+        local n r p
+        IFS=: read -r n r p <<<"${ENC_META[scrypt]:-?:?:?}"
+        printf 'scrypt (N=%s, r=%s, p=%s; memory-hard)' "$n" "$r" "$p"
+    else
+        printf 'PBKDF2-HMAC-SHA256, %s iterations' "${ENC_META[iter]:-?}"
+    fi
+}
+
+# Description of the KDF a new password-protected file would get.
+crypto_new_kdf_label() {
+    if [[ "$(crypto_resolve_kdf "${1:-$ENC_DEFAULT_KDF}")" == "scrypt" ]]; then
+        printf 'scrypt (N=%d, r=%d, p=%d; memory-hard)' "$ENC_SCRYPT_N" "$ENC_SCRYPT_R" "$ENC_SCRYPT_P"
+    else
+        printf 'PBKDF2-HMAC-SHA256, %s iterations' "$ENC_DEFAULT_ITER"
+    fi
 }
 
 # Certificate helpers (public information only).
@@ -296,16 +415,26 @@ crypto_inspect() {
     fi
     case "$mode" in
         password)
-            if [[ "${ENC_META[kdf]:-}" != "pbkdf2-hmac-sha256" ]]; then
-                ENC_ERR="Unsupported KDF in header: ${ENC_META[kdf]:-<missing>}"; return "$EX_UNSUPPORTED"
-            fi
-            if [[ ! "${ENC_META[iter]:-}" =~ ^[0-9]{1,9}$ ]] ||
-               (( ENC_META[iter] < ENC_ITER_READ_MIN || ENC_META[iter] > ENC_ITER_MAX )); then
-                ENC_ERR="Invalid KDF iteration count in header."; return "$EX_UNSUPPORTED"
-            fi
-            if [[ ! "${ENC_META[salt]:-}" =~ ^[0-9a-f]{16}$ ]]; then
-                ENC_ERR="Invalid salt in header."; return "$EX_UNSUPPORTED"
-            fi
+            case "${ENC_META[kdf]:-}" in
+                pbkdf2-hmac-sha256)
+                    if [[ ! "${ENC_META[iter]:-}" =~ ^[0-9]{1,9}$ ]] ||
+                       (( ENC_META[iter] < ENC_ITER_READ_MIN || ENC_META[iter] > ENC_ITER_MAX )); then
+                        ENC_ERR="Invalid KDF iteration count in header."; return "$EX_UNSUPPORTED"
+                    fi
+                    if [[ ! "${ENC_META[salt]:-}" =~ ^[0-9a-f]{16}$ ]]; then
+                        ENC_ERR="Invalid salt in header."; return "$EX_UNSUPPORTED"
+                    fi ;;
+                scrypt)
+                    # The authoritative parameters are the ones inside the sealed
+                    # blob; they are extracted and bounded here, before any work.
+                    local sp
+                    sp=$(_crypto_sealed_params "${ENC_META[sealed]:-}") || {
+                        ENC_ERR="Invalid or out-of-range scrypt key envelope in header."; return "$EX_UNSUPPORTED"
+                    }
+                    ENC_META[scrypt]="$sp" ;;
+                *)
+                    ENC_ERR="Unsupported KDF in header: ${ENC_META[kdf]:-<missing>}"; return "$EX_UNSUPPORTED" ;;
+            esac
             ;;
         recipient)
             if [[ "${ENC_META[keywrap]:-}" != "cms" || -z "${ENC_META[wrapped]:-}" ]]; then
@@ -328,7 +457,7 @@ crypto_inspect() {
 #   IN  : path, or "-" for stdin        OUT : path, or "-" for stdout
 #   Mode: recipient if ENC_RECIPIENTS is non-empty, otherwise password (ENC_SECRET).
 crypto_encrypt() {
-    local in="$1" out="$2" cipher="${3:-$ENC_DEFAULT_CIPHER}" iter="${4:-$ENC_DEFAULT_ITER}"
+    local in="$1" out="$2" cipher="${3:-$ENC_DEFAULT_CIPHER}" iter="${4:-$ENC_DEFAULT_ITER}" kdf_req="${5:-$ENC_DEFAULT_KDF}"
     ENC_ERR=""; ENC_RESULT_BYTES_IN=0; ENC_RESULT_BYTES_OUT=0
     core_tmpdir
 
@@ -378,18 +507,37 @@ crypto_encrypt() {
         if (( ${#ENC_SECRET} > ENC_PASS_MAX )); then
             ENC_ERR="Password is too long (limit: ${ENC_PASS_MAX} characters)."; return "$EX_USAGE"
         fi
-        if [[ ! "$iter" =~ ^[0-9]{1,9}$ ]] || (( iter < ENC_ITER_MIN || iter > ENC_ITER_MAX )); then
-            ENC_ERR="PBKDF2 iteration count must be between ${ENC_ITER_MIN} and ${ENC_ITER_MAX}."; return "$EX_USAGE"
+        local kdf sealed
+        case "$kdf_req" in scrypt|pbkdf2|auto) ;; *) ENC_ERR="Unknown KDF '$kdf_req'. Valid: scrypt pbkdf2 auto"; return "$EX_USAGE" ;; esac
+        kdf=$(crypto_resolve_kdf "$kdf_req")
+        if [[ "$kdf" == "scrypt" ]]; then
+            if ! crypto_scrypt_available; then
+                ENC_ERR="scrypt is not available in this OpenSSL build; use --kdf pbkdf2."; return "$EX_UNSUPPORTED"
+            fi
+            master=$(_crypto_rand_hex 32)
+            if [[ ! "$master" =~ ^[0-9a-f]{64}$ ]]; then
+                ENC_ERR="Could not obtain random bytes from OpenSSL."; return "$EX_FAIL"
+            fi
+            _crypto_phase kdf "scrypt N=${ENC_SCRYPT_N} r=${ENC_SCRYPT_R} p=${ENC_SCRYPT_P}"
+            sealed=$(_crypto_seal_master "$master" "$ENC_SECRET") || {
+                ENC_ERR="Could not seal the file key with scrypt."; return "$EX_FAIL"
+            }
+            header="${ENC_MAGIC}"$'\n'"mode: password"$'\n'"cipher: ${cipher}"$'\n'"mac: hmac-sha256"$'\n'"kdf: scrypt"$'\n'"sealed: ${sealed}"$'\n'"---"$'\n'
+        else
+            if [[ ! "$iter" =~ ^[0-9]{1,9}$ ]] || (( iter < ENC_ITER_MIN || iter > ENC_ITER_MAX )); then
+                ENC_ERR="PBKDF2 iteration count must be between ${ENC_ITER_MIN} and ${ENC_ITER_MAX}."; return "$EX_USAGE"
+            fi
+            salt=$(_crypto_rand_hex 8)
+            if [[ ! "$salt" =~ ^[0-9a-f]{16}$ ]]; then
+                ENC_ERR="Could not obtain random bytes from OpenSSL."; return "$EX_FAIL"
+            fi
+            _crypto_phase kdf "PBKDF2-HMAC-SHA256, ${iter} iterations"
+            master=$(_crypto_pbkdf2 "$ENC_SECRET" "$salt" "$iter") || {
+                ENC_ERR="Key derivation failed (PBKDF2 is not supported by this OpenSSL build?)."; return "$EX_FAIL"
+            }
+            header="${ENC_MAGIC}"$'\n'"mode: password"$'\n'"cipher: ${cipher}"$'\n'"mac: hmac-sha256"$'\n'"kdf: pbkdf2-hmac-sha256"$'\n'"iter: ${iter}"$'\n'"salt: ${salt}"$'\n'"---"$'\n'
         fi
-        salt=$(_crypto_rand_hex 8)
-        if [[ ! "$salt" =~ ^[0-9a-f]{16}$ ]]; then
-            ENC_ERR="Could not obtain random bytes from OpenSSL."; return "$EX_FAIL"
-        fi
-        _crypto_phase kdf "$iter"
-        master=$(_crypto_pbkdf2 "$ENC_SECRET" "$salt" "$iter") || {
-            ENC_ERR="Key derivation failed (PBKDF2 is not supported by this OpenSSL build?)."; return "$EX_FAIL"
-        }
-        header="${ENC_MAGIC}"$'\n'"mode: password"$'\n'"cipher: ${cipher}"$'\n'"mac: hmac-sha256"$'\n'"kdf: pbkdf2-hmac-sha256"$'\n'"iter: ${iter}"$'\n'"salt: ${salt}"$'\n'"---"$'\n'
+        ENC_RESULT_KDF="$kdf"
     fi
 
     local enc_key mac_key
@@ -491,10 +639,21 @@ crypto_decrypt() {
     if [[ "${ENC_META[mode]}" == "password" ]]; then
         if [[ -z "$ENC_SECRET" ]]; then ENC_ERR="This file is password-protected: a password is required."; return "$EX_USAGE"; fi
         if (( ${#ENC_SECRET} > ENC_PASS_MAX )); then ENC_ERR="Password is too long."; return "$EX_USAGE"; fi
-        _crypto_phase kdf "${ENC_META[iter]}"
-        master=$(_crypto_pbkdf2 "$ENC_SECRET" "${ENC_META[salt]}" "${ENC_META[iter]}") || {
-            ENC_ERR="Key derivation failed."; return "$EX_FAIL"
-        }
+        if [[ "${ENC_META[kdf]}" == "scrypt" ]]; then
+            if ! crypto_scrypt_available; then
+                ENC_ERR="This file uses scrypt, which this OpenSSL build does not support."; return "$EX_UNSUPPORTED"
+            fi
+            _crypto_phase kdf "scrypt ${ENC_META[scrypt]}"
+            master=$(_crypto_unseal_master "${ENC_META[sealed]}" "$ENC_SECRET") || {
+                ENC_ERR="Authentication failed: wrong password, or the file has been modified or corrupted."
+                return "$EX_AUTH"
+            }
+        else
+            _crypto_phase kdf "PBKDF2-HMAC-SHA256, ${ENC_META[iter]} iterations"
+            master=$(_crypto_pbkdf2 "$ENC_SECRET" "${ENC_META[salt]}" "${ENC_META[iter]}") || {
+                ENC_ERR="Key derivation failed."; return "$EX_FAIL"
+            }
+        fi
     else
         if [[ -z "$ENC_KEY_FILE" ]]; then ENC_ERR="This file is encrypted for certificate recipients: a private key (--key) is required."; return "$EX_USAGE"; fi
         if [[ ! -f "$ENC_KEY_FILE" || ! -r "$ENC_KEY_FILE" ]]; then ENC_ERR="Private key not found or not readable: $ENC_KEY_FILE"; return "$EX_NOINPUT"; fi
@@ -605,7 +764,7 @@ _crypto_decrypt_legacy_enc() {
 
     core_tmpdir
     local errf="$TEMP_DIR/dec.err" rc part
-    _crypto_phase kdf "$iter"
+    _crypto_phase kdf "PBKDF2-HMAC-SHA256, ${iter} iterations"
     if [[ "$out" == "-" ]]; then
         openssl enc -d "-$algo" -pbkdf2 -iter "$iter" -md sha256 -in "$in" \
             -pass fd:3 3< <(printf '%s\n' "$ENC_SECRET") 2>"$errf"
@@ -741,16 +900,32 @@ crypto_selftest() {
     if [[ "$got" != "$CRYPTO_KAT_PBKDF2" ]]; then
         ENC_ERR="PBKDF2-HMAC-SHA256 known-answer test failed."; return 1
     fi
-    # Round trip + tamper detection with the default cipher.
+    # scrypt envelope: a fixed blob sealed by OpenSSL 3.0 must open to the same
+    # key everywhere (proves cross-version interoperability of the container).
+    if crypto_scrypt_available; then
+        got=$(_crypto_sealed_params "$CRYPTO_KAT_SCRYPT_SEALED")
+        if [[ "$got" != "1024:8:1" ]]; then ENC_ERR="scrypt envelope parameter parsing failed."; return 1; fi
+        got=$(_crypto_unseal_master "$CRYPTO_KAT_SCRYPT_SEALED" "encryptor-selftest")
+        if [[ "$got" != "$CRYPTO_KAT_SCRYPT_MASTER" ]]; then ENC_ERR="scrypt known-answer test failed."; return 1; fi
+        if _crypto_unseal_master "$CRYPTO_KAT_SCRYPT_SEALED" "wrong-password" >/dev/null; then
+            ENC_ERR="scrypt envelope accepted a wrong password."; return 1
+        fi
+    fi
+    # Round trip + tamper detection with the default cipher (both KDFs).
     core_tmpdir
     local d="$TEMP_DIR/selftest"; mkdir -p "$d" || return 1
     local saved_secret="$ENC_SECRET"; local -a saved_rcpt=("${ENC_RECIPIENTS[@]:-}")
     ENC_RECIPIENTS=(); ENC_SECRET="selftest-password"
     printf 'encryptor self-test payload\n' > "$d/plain"
     local rc=0
-    crypto_encrypt "$d/plain" "$d/enc" "$ENC_DEFAULT_CIPHER" "$ENC_ITER_MIN" || rc=1
+    crypto_encrypt "$d/plain" "$d/enc" "$ENC_DEFAULT_CIPHER" "$ENC_ITER_MIN" pbkdf2 || rc=1
     (( rc == 0 )) && { crypto_decrypt "$d/enc" "$d/back" || rc=1; }
     (( rc == 0 )) && { cmp -s "$d/plain" "$d/back" || rc=1; }
+    if (( rc == 0 )) && crypto_scrypt_available; then
+        crypto_encrypt "$d/plain" "$d/enc2" "$ENC_DEFAULT_CIPHER" "$ENC_ITER_MIN" scrypt || rc=1
+        (( rc == 0 )) && { crypto_decrypt "$d/enc2" "$d/back2" || rc=1; }
+        (( rc == 0 )) && { cmp -s "$d/plain" "$d/back2" || rc=1; }
+    fi
     if (( rc == 0 )); then
         # Flip one ciphertext byte: authentication must fail.
         local size; size=$(get_file_size "$d/enc")

@@ -18,6 +18,14 @@ written by 2.x remain readable.
   the header and the ciphertext and is verified before any plaintext is
   written. A wrong password is now always detected. Specification:
   `docs/FORMAT.md`.
+- **Memory-hard password KDF by default.** Password-protected files seal a
+  random file key with scrypt (N=2^14, r=8, p=5 — an OWASP-listed
+  configuration) inside a standard PKCS#8 envelope, the one route by which the
+  OpenSSL command line runs scrypt without the password appearing in process
+  arguments. `--kdf pbkdf2` / `ENCRYPTOR_KDF=pbkdf2` selects
+  PBKDF2-HMAC-SHA256 (600,000 iterations) for NIST-only policies; it is also
+  the automatic fallback on OpenSSL builds without scrypt. Parameters found in
+  a file are bounded before any derivation runs.
 - **Secrets never touch the disk or argv.** Passwords and keys are handed to
   OpenSSL through anonymous pipes (`-pass fd:N`) instead of a file in `/tmp`.
 - **Certificate encryption actually works, and scales.** A random file key is
@@ -49,8 +57,14 @@ written by 2.x remain readable.
   copy before deleting the original), `--force`, `--quiet`, `--no-color`.
 - Password sources: `--pass-file`, `--pass-env`, `--pass-stdin`, terminal prompt.
 - Stable exit codes (0–6, 130) and a richer `--json` schema.
-- `encryptor selftest`: HMAC-SHA256 (RFC 4231) and PBKDF2 known-answer tests,
-  round trip and tamper detection. Run by the installer and the audit.
+- `encryptor selftest`: HMAC-SHA256 (RFC 4231), PBKDF2 and scrypt-envelope
+  known-answer tests, round trips and tamper detection. Run by the installer,
+  the audit and the Docker build.
+- `--kdf scrypt|pbkdf2|auto`.
+- `build_release.sh`: one script for release artifacts (version-consistency
+  check, tests, `.deb`, source tarball, `SHA256SUMS`), run by CI on every push
+  and by the Release workflow; the workflow can be dry-run from the Actions tab.
+- CI builds and exercises the Docker image and the RPM package.
 - Automatic format detection on decryption; reads 2.0 and 2.1 files
   (`--legacy-iter`) and 2.x S/MIME files.
 - PKI: quick identity, certificate import with fingerprint confirmation,

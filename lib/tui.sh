@@ -28,7 +28,7 @@ tui_screen() {
 crypto_on_phase() {
     (( TUI_ACTIVE )) || return 0
     case "$1" in
-        kdf)     ui_spinner_start "Deriving key ${G_DOT} PBKDF2-HMAC-SHA256, ${2:-?} iterations" ;;
+        kdf)     ui_spinner_start "Deriving key ${G_DOT} ${2:-}" ;;
         keygen)  ui_spinner_start "Generating and wrapping the file key" ;;
         unwrap)  ui_spinner_start "Unwrapping the file key" ;;
         encrypt) ui_spinner_start "Encrypting" "${2:-}" "${3:-0}" ;;
@@ -230,7 +230,7 @@ tui_encrypt() {
         crypto_reset_inputs; ui_pause; return 0
     fi
     local keyline
-    if [[ "$method" == "p" ]]; then keyline="Password ${G_DOT} PBKDF2-HMAC-SHA256, ${ENC_DEFAULT_ITER} iterations"
+    if [[ "$method" == "p" ]]; then keyline="Password ${G_DOT} $(crypto_new_kdf_label "$ENC_RESULT_KDF")"
     else keyline="${#ENC_RECIPIENTS[@]} certificate recipient(s) ${G_DOT} CMS key wrap"; fi
     log_operation "SUCCESS" "Encrypted: $in → $out (cipher=$TUI_CIPHER, mode=$([[ $method == p ]] && echo password || echo recipient))"
     UI_PANEL_COLOR="$C_OK"
@@ -289,7 +289,7 @@ _tui_describe() {
             TUI_DESC+=("$(ui_row "Format" "ENCRYPTOR/3 ${G_DOT} ${C_OK}authenticated${RESET}")")
             TUI_DESC+=("$(ui_row "Cipher" "${ENC_CIPHER_LABEL[${ENC_META[cipher]}]}")")
             if [[ "${ENC_META[mode]}" == "password" ]]; then
-                TUI_DESC+=("$(ui_row "Key" "Password ${G_DOT} PBKDF2-HMAC-SHA256, ${ENC_META[iter]} iterations")")
+                TUI_DESC+=("$(ui_row "Key" "Password ${G_DOT} $(crypto_meta_kdf_label)")")
             else
                 TUI_DESC+=("$(ui_row "Key" "${#ENC_META_RCPT[@]} certificate recipient(s) ${G_DOT} CMS key wrap")")
                 for fp in "${ENC_META_RCPT[@]:-}"; do
@@ -510,10 +510,12 @@ _tui_main_header() {
     ui_banner
     printf '  %sAuthenticated file encryption %s X.509 toolkit%s%*s%sv%s%s\n' "$C_MUTED" "$G_DOT" "$RESET" 6 '' "$C_ACCENT" "$ENCRYPTOR_VERSION" "$RESET"
     printf ' %s%s%s\n' "$C_MUTED" "$(ui_repeat "$G_H" "$UI_W")" "$RESET"
-    printf '  %s%s%s %s   %s%s%s %s   %s%s%s PBKDF2 %s\n' \
+    local kdfname="PBKDF2 ${ENC_DEFAULT_ITER}"
+    [[ "$(crypto_resolve_kdf "$ENC_DEFAULT_KDF")" == "scrypt" ]] && kdfname="scrypt"
+    printf '  %s%s%s %s   %s%s%s %s   %s%s%s %s\n' \
         "$C_OK" "$G_INFO" "$RESET" "$OPENSSL_VERSION_TEXT" \
         "$C_OK" "$G_INFO" "$RESET" "${ENC_CIPHER_LABEL[$TUI_CIPHER]}" \
-        "$C_OK" "$G_INFO" "$RESET" "$ENC_DEFAULT_ITER"
+        "$C_OK" "$G_INFO" "$RESET" "$kdfname"
     local certline="${C_INFO}${G_INFO}${RESET} ${PKI_COUNT_CERTS} certificate(s) ${G_DOT} ${PKI_COUNT_KEYS} key(s)"
     (( PKI_COUNT_EXPIRED > 0 ))  && certline+="   ${C_ERR}${G_ERR} ${PKI_COUNT_EXPIRED} expired${RESET}"
     (( PKI_COUNT_EXPIRING > 0 )) && certline+="   ${C_WARN}${G_WARN} ${PKI_COUNT_EXPIRING} expiring soon${RESET}"

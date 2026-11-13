@@ -1,33 +1,41 @@
 name: Release
 
-# Pushing a tag such as v3.0.0 runs the tests, builds the artifacts and
-# publishes a GitHub release with a SHA256SUMS file. install.sh users can then
-# pin ENCRYPTOR_REF=v3.0.0 and ENCRYPTOR_SHA256=<checksum of the source tarball>.
+# Publishing: push a tag such as v3.0.0. The job runs the tests, builds the
+# artifacts with build_release.sh and publishes a GitHub release with a
+# SHA256SUMS file.
+#
+# Dry run: "Run workflow" from the Actions tab builds the same artifacts from
+# any branch and attaches them to the run, without publishing anything.
+# CI also runs build_release.sh on every push.
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write          # needed only by the publish step
     steps:
       - uses: actions/checkout@v4
-      - name: Tag must match the program version
-        run: |
-          version="$(bash encryptor.sh version | awk '{print $2}')"
-          test "$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != program $version"; exit 1; }
-      - name: Tests
-        run: bash tests/run.sh
-      - name: Build artifacts
-        run: |
-          ./build_deb.sh
-          git archive --format=tar.gz --prefix="encryptor-${GITHUB_REF_NAME#v}/" -o "encryptor-${GITHUB_REF_NAME#v}.tar.gz" "$GITHUB_REF_NAME"
-          sha256sum encryptor_*.deb encryptor-*.tar.gz > SHA256SUMS
-          cat SHA256SUMS
-      - name: Publish release
+      - name: Build artifacts (tag must match the program version)
+        if: github.ref_type == 'tag'
+        run: ./build_release.sh "$GITHUB_REF_NAME"
+      - name: Build artifacts (dry run)
+        if: github.ref_type != 'tag'
+        run: ./build_release.sh
+      - name: Attach artifacts to the workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: encryptor-release
+          path: dist/
+          if-no-files-found: error
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" encryptor_*.deb encryptor-*.tar.gz SHA256SUMS --title "Encryptor ${GITHUB_REF_NAME}" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Encryptor $GITHUB_REF_NAME" --generate-notes
