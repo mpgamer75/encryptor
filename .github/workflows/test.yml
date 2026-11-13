@@ -49,13 +49,13 @@ jobs:
 
   # ── 3. Compatibility (informational: does not block merges) ─────────────────
   compat-openssl-111:
-    name: Compatibility — OpenSSL 1.1.1 (Debian 11)
+    name: Compatibility — OpenSSL 1.1.1 (Ubuntu 20.04)
     runs-on: ubuntu-latest
-    container: debian:11
+    container: ubuntu:20.04
     continue-on-error: true
     steps:
       - name: Install tools
-        run: apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates git python3
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssl ca-certificates git python3
       - uses: actions/checkout@v4
       - name: Versions
         run: bash --version | head -n 1 && openssl version
