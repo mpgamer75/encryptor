@@ -4,16 +4,11 @@
 
 | Version | Status |
 |---------|--------|
-| 2.1.x | ✅ Supported — actively maintained |
-| 2.0.x | ⚠️ Critical fixes only |
-| < 2.0 | ❌ Not supported |
+| 3.0.x | ✅ Supported |
+| 2.x | ❌ Not supported — upgrade (3.0 still reads 2.x files) |
 
-Users running versions below 2.1.0 are strongly encouraged to upgrade.
-Version 2.1.0 contains critical security fixes including:
-- Password no longer exposed in process argument list (`ps aux`)
-- False AEAD claim corrected (AES-256-CBC/CTR are not authenticated)
-- PKCS#12 export password leak fixed
-- PBKDF2 iterations raised to OWASP 2024 recommended level (600,000)
+Version 3.0.0 fixes several serious defects of 2.x; see "Fixed in 3.0" below.
+Users of 2.x should upgrade and re-encrypt their files.
 
 ---
 
@@ -48,55 +43,109 @@ If you discover a security vulnerability in Encryptor:
 
 ---
 
-## Security Design
+## Security design
 
-### Password handling
-Passwords are never passed on the command line. They are written to a
-mode-600 temporary file in `/tmp/encryptor_$$` and passed to OpenSSL via
-`-pass file:/path`. The temporary directory is removed by an EXIT trap.
+### Threat model
 
-### Key derivation
-Password-based encryption uses PBKDF2-HMAC-SHA256 with 600,000 iterations
-and a random 8-byte salt, meeting OWASP 2024 and NIST SP 800-132 requirements.
+Encryptor protects the **confidentiality and integrity of files at rest and in
+transit** against an attacker who can read and modify the encrypted file but
+does not know the password or hold a recipient's private key.
 
-### Authenticated encryption
-AES-256-GCM (the default) and S/MIME provide authenticated encryption (AEAD).
-Legacy modes (CBC, CTR, ChaCha20, Camellia-CBC, ARIA-CBC) provide confidentiality
-only. A SHA-256 integrity sidecar file provides external tamper detection for
-all modes.
+It does not protect against: malware or another user with root on the machine
+where you encrypt or decrypt; weak or reused passwords; an attacker who can
+replace the `encryptor` or `openssl` binaries; traffic analysis (file sizes and
+recipient fingerprints are visible).
 
-### Private key storage
-Private keys are stored with mode 400 (read-only by owner). The security audit
-flags any keys with weaker permissions.
+### Authenticated container
+New files use the ENCRYPTOR/3 format (docs/FORMAT.md): cipher + HMAC-SHA256,
+encrypt-then-MAC, independent subkeys. The tag covers the header and the
+ciphertext and is verified before decryption. Cipher, MAC and KDF names read
+from a file are checked against allow-lists; iteration counts are bounded.
 
-### Temporary files
-All temporary files (password files, OpenSSL error buffers) are created inside
-`/tmp/encryptor_$$` which is removed on program exit via `trap`.
+### Secret handling
+- Passwords, derived keys and key passphrases are passed to OpenSSL through
+  anonymous pipes (`-pass fd:N`). They are never placed in process arguments
+  and never written to disk. HMAC keys are fed through standard input by shell
+  built-ins.
+- Secrets are accepted from the terminal (no echo), a file, an environment
+  variable or standard input — never from a command-line argument.
+- The CI suite checks that a canary password never appears in any
+  `/proc/*/cmdline` or in the temporary directory.
 
-### Logging
-The operation log (`~/.config/encryptor/encryptor.log`) records operation types
-and file names but never passwords, key material, or decrypted content.
+### Files and permissions
+- The process runs with `umask 077`: encrypted and decrypted outputs are 0600.
+- State directory and key store are 0700; private keys 0400; the log 0600.
+- Temporary data lives in a `mktemp -d` directory (unpredictable name, 0700)
+  removed on exit and on SIGINT/SIGTERM/SIGHUP. It only ever holds ciphertext
+  spooled from standard input, error output and short-lived OpenSSL
+  configuration files containing certificate subject fields.
+- Outputs are written to a temporary name and renamed on success; partial
+  files are removed on failure or interruption.
+- Existing files are not overwritten without `--force`.
+
+### Input handling
+- Cipher names are matched against a fixed list before reaching OpenSSL
+  (2.x passed `--algo` straight through, so `--algo none` produced plaintext).
+- Object names in the key store are restricted to `[A-Za-z0-9._-]`.
+- Certificate subject fields are written to an OpenSSL config with escaping
+  instead of being interpolated into `-subj`.
+- TLS scan targets must match a host/IP[:port] grammar and can never be
+  interpreted as options.
+- Log messages are stripped of control characters; JSON output is escaped.
+
+### Supply chain
+- `install.sh` installs from a local checkout, or downloads a tarball of a
+  ref you can pin (`ENCRYPTOR_REF`) and verify (`ENCRYPTOR_SHA256`). It never
+  edits shell start-up files and never calls `sudo`.
+- testssl.sh is optional, fetched only on request, from a pinned release tag.
+- Releases are built by CI and published with a `SHA256SUMS` file.
 
 ---
 
-## Known Limitations
+## Known limitations
 
-- **SSD secure deletion:** `shred` may not effectively overwrite data on SSDs,
-  NVMe drives, RAID arrays, or network-mounted filesystems due to wear leveling
-  and write buffering. Encryptor attempts shred/overwrite but cannot guarantee
-  secure deletion on these storage types.
+- **PBKDF2 is not memory-hard.** It is the only password KDF the OpenSSL
+  command line can run without exposing the password in process arguments.
+  Use long passphrases (`encryptor passgen`).
+- **No sender authentication** in recipient mode, and no signatures.
+- **Whole-file authentication.** Verification is a separate pass before
+  decryption; this is not a chunked streaming AEAD.
+- **Secrets in memory.** Passwords live in Bash variables while the program
+  runs. Bash cannot lock or reliably wipe memory; with swap or core dumps
+  enabled they could reach the disk. `encryptor audit` reports the core-dump
+  setting.
+- **Environment variables** (`--pass-env`) are readable by the same user (and
+  root) through `/proc/<pid>/environ`. Prefer `--pass-file` or `--pass-stdin`.
+- **Secure deletion is best-effort.** `shred`/overwriting does not reliably
+  destroy data on SSDs, copy-on-write or journaling filesystems, snapshots,
+  RAID or network storage. Use full-disk encryption.
+- **Legacy 2.x files are not authenticated.** They can be decrypted but not
+  verified; re-encrypt them.
+- **Time-of-check/time-of-use.** The file is read twice (verify, then
+  decrypt). An attacker able to swap the file between the two reads on your
+  own machine could cause unauthenticated plaintext to be produced; such an
+  attacker already controls your account.
+- **Not independently audited.**
 
-- **Non-AEAD modes:** AES-256-CBC, AES-256-CTR, ChaCha20, Camellia-256-CBC,
-  and ARIA-256-CBC provide no authentication. The SHA-256 sidecar provides
-  basic tamper detection but is not cryptographically equivalent to AEAD.
-  Use AES-256-GCM or S/MIME for authenticated encryption.
+---
 
-- **Shell history:** Interactive password entry uses `read -rs` (silent, no
-  echo). The entered password is not stored in shell history. However, if a
-  user accidentally types their password at the main menu prompt (before being
-  asked), it may appear in history.
+## Fixed in 3.0
 
-- **Memory:** Passwords exist in Bash process memory while the script runs.
-  On systems with active swap or core dump enabled, this could theoretically
-  be recovered. Disabling swap or using encrypted swap is recommended for
-  high-security environments.
+Defects present in 2.1.0 and earlier:
+
+| Severity | Issue |
+|---|---|
+| Critical | Certificate ("S/MIME") encryption failed silently on OpenSSL 3 — it reported success without creating a file, then offered to shred the original. |
+| Critical | When it did run, S/MIME mode corrupted binary files and rewrote line endings (missing `-binary`). |
+| Critical | No authentication: the `.sha256` sidecar was an unkeyed hash anyone could recompute; batch mode never checked it. Ciphertext could be modified undetected (bit-flipping in CTR/ChaCha20). |
+| High | `--algo` was passed to OpenSSL unchecked: `--algo none` wrote plaintext and reported success. |
+| High | A wrong password with CTR/ChaCha20 "succeeded" and wrote garbage. |
+| High | Documentation claimed AES-256-GCM was the default; it was never available. |
+| High | Passwords were written to a file under a predictable `/tmp/encryptor_$$` path created without checking ownership. |
+| High | TLS scan target accepted option-like input (option injection into testssl.sh); testssl.sh was cloned from an unpinned branch. |
+| Medium | 2.1 could not decrypt 2.0 files (iteration count changed, not stored). |
+| Medium | Outputs and the log were world-readable under the default umask; existing files were overwritten silently. |
+| Medium | CA and identity keys were always unencrypted; signed certificates had no X.509v3 extensions; names allowed path traversal. |
+| Medium | JSON output was not escaped; log lines could be forged through file names. |
+| Medium | The installer used any `encryptor.sh` found in the current directory and "verified" checksums that did not exist. |
+| Low | PKCS#12 export allowed an empty password; key/certificate matching only worked for RSA; the menu looped forever on end-of-input. |

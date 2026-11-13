@@ -1,0 +1,186 @@
+# The ENCRYPTOR/3 container format
+
+This document specifies the file format written by Encryptor 3.x precisely
+enough to re-implement it, and shows how to decrypt a file with nothing but
+the `openssl` command.
+
+## Design goals
+
+1. **Authenticated.** Any modification of the header or the ciphertext, and a
+   wrong password, must be detected before plaintext is released.
+2. **Self-describing.** The file records its own cipher and key-derivation
+   parameters. Nothing has to be remembered or guessed at decryption time.
+3. **Standard building blocks only.** PBKDF2-HMAC-SHA256, HMAC-SHA256,
+   `openssl enc`, CMS. No custom primitives.
+4. **Recoverable.** A file must remain decryptable with stock OpenSSL if this
+   tool is unavailable.
+5. **No secret in argv or on disk** during normal operation.
+
+## Layout
+
+```
+ENCRYPTOR/3\n                       magic + format version
+mode: password\n                    password | recipient
+cipher: aes-256-ctr\n               an OpenSSL cipher name from the allow-list
+mac: hmac-sha256\n
+...mode-specific fields...\n
+---\n                               end of header
+<body>                              binary
+<tag>                               64 lowercase hex characters, no newline
+```
+
+The header is ASCII, one `key: value` per line, LF line endings. Keys match
+`[a-z][a-z0-9-]*`; values match `[A-Za-z0-9+/=._:-]+`. Readers ignore unknown
+keys (they are still covered by the tag) and reject a file whose header is
+longer than 64 lines, has a malformed line, or names a cipher, MAC or KDF that
+is not on the allow-list.
+
+### Password mode
+
+```
+mode: password
+cipher: aes-256-ctr
+mac: hmac-sha256
+kdf: pbkdf2-hmac-sha256
+iter: 600000
+salt: 3d00f296b520946d              8 random bytes, hex
+---
+```
+
+### Recipient mode
+
+```
+mode: recipient
+cipher: aes-256-ctr
+mac: hmac-sha256
+keywrap: cms
+recipient-fp: <sha256 fingerprint of recipient certificate 1, hex>
+recipient-fp: <sha256 fingerprint of recipient certificate 2, hex>
+wrapped: <base64, single line>
+---
+```
+
+`wrapped` is a DER-encoded CMS EnvelopedData structure whose content is the
+64-character hex master key, with one RecipientInfo per certificate: RSA keys
+use RSA-OAEP with SHA-256, EC keys use ECDH key agreement. `recipient-fp`
+lines are informational (they let `inspect` show who can open the file).
+
+## Key schedule
+
+```
+master   = PBKDF2-HMAC-SHA256(password, salt, iter, 32 bytes)      (password mode)
+master   = 32 random bytes                                          (recipient mode)
+
+body_key = HMAC-SHA256(key = master, msg = "encryptor/3 body-encryption")
+mac_key  = HMAC-SHA256(key = master, msg = "encryptor/3 authentication")
+```
+
+All three keys are handled as lowercase hex strings. `master`, when used as an
+HMAC key, is the 32 raw bytes. The two labels make the encryption and
+authentication keys independent.
+
+## Body
+
+The body is exactly the output of
+
+```
+openssl enc -<cipher> -pbkdf2 -iter 1 -md sha256 -salt -pass <body_key as 64 hex characters>
+```
+
+that is: the 8 bytes `Salted__`, an 8-byte random salt, then the ciphertext.
+OpenSSL derives the actual cipher key and IV from the hex `body_key` string and
+that salt. One PBKDF2 iteration is sufficient here because `body_key` is
+already a uniformly random 256-bit value; the per-file random salt guarantees a
+fresh key/IV pair for every file.
+
+## Tag
+
+```
+tag = HMAC-SHA256(key = mac_key, msg = every byte of the file before the tag)
+```
+
+i.e. the header (from the `E` of `ENCRYPTOR/3` through the newline after
+`---`) followed by the body. The tag is appended as 64 lowercase hex
+characters.
+
+## Decryption procedure
+
+1. Parse and validate the header (strict grammar and allow-lists).
+2. Obtain `master` (PBKDF2, or CMS-decrypt `wrapped` with the private key).
+3. Derive `body_key` and `mac_key`.
+4. Compute the tag over `file[0 .. size-64)` and compare it with the stored
+   tag. **Stop on mismatch** — nothing is written.
+5. Decrypt `file[header_length .. size-64)` with `openssl enc -d`.
+
+A wrong password yields a different `master`, hence a different `mac_key`, so
+step 4 fails: "wrong password" and "modified file" are deliberately
+indistinguishable.
+
+## Security properties and limits
+
+- Confidentiality and integrity of the content; integrity of the header
+  (cipher, iteration count and recipients cannot be altered or downgraded).
+- Encrypt-then-MAC with independent keys is a standard, provably sound
+  composition. With the AES ciphers every primitive is NIST-approved.
+- The file length and the recipients' certificate fingerprints are visible.
+- The tag is checked once, over the whole file: decryption needs two passes
+  and input from a pipe is spooled to a private temporary file (ciphertext
+  only). This is not a chunked streaming AEAD.
+- PBKDF2 is not memory-hard. Password strength matters; use a long passphrase.
+- Recipient mode does not authenticate the sender: anyone holding the
+  certificate can create a valid file for its owner.
+- The 8-byte PBKDF2 salt is the size `openssl enc` supports on every OpenSSL
+  version; it prevents precomputation and makes the master key unique per file.
+
+## Recovery with stock OpenSSL
+
+No Encryptor installation is required. In this emergency procedure the
+password and keys appear on the command line, so run it on a machine you
+trust and clear your shell history afterwards.
+
+```bash
+f=backup.enc
+read -rs -p "Password: " PW; echo
+
+hdr_len=$(LC_ALL=C awk '{ n += length($0) + 1 } /^---$/ { print n; exit }' "$f")
+salt=$(sed -n '/^---$/q; s/^salt: //p' "$f")
+iter=$(sed -n '/^---$/q; s/^iter: //p' "$f")
+cipher=$(sed -n '/^---$/q; s/^cipher: //p' "$f")
+size=$(wc -c < "$f" | tr -d ' ')
+
+# master key (password mode)
+master=$(openssl enc -aes-256-ctr -pbkdf2 -iter "$iter" -md sha256 -S "$salt" -P -pass "pass:$PW" \
+         | sed -n 's/^key=//p' | tr 'A-F' 'a-f')
+
+body_key=$(printf '%s' 'encryptor/3 body-encryption' | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$master" -r | cut -d' ' -f1)
+mac_key=$(printf '%s' 'encryptor/3 authentication'  | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$master" -r | cut -d' ' -f1)
+
+# 1. authenticate
+calc=$(head -c $(( size - 64 )) "$f" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$mac_key" -r | cut -d' ' -f1)
+[ "$calc" = "$(tail -c 64 "$f")" ] && echo "authentic" || { echo "WRONG PASSWORD OR MODIFIED FILE"; exit 1; }
+
+# 2. decrypt
+head -c $(( size - 64 )) "$f" | tail -c "+$(( hdr_len + 1 ))" \
+  | openssl enc -d "-$cipher" -pbkdf2 -iter 1 -md sha256 -pass "pass:$body_key" > recovered.out
+```
+
+For a recipient-mode file, replace the `master=` line with:
+
+```bash
+master=$(sed -n '/^---$/q; s/^wrapped: //p' "$f" | openssl base64 -d -A \
+         | openssl cms -decrypt -binary -inform DER -inkey my.key)
+```
+
+This recipe is executed by the test suite (`tests/run.sh`), so it cannot
+silently go stale.
+
+## Legacy formats (read-only)
+
+| Written by | Format | Detection | Notes |
+|---|---|---|---|
+| Encryptor 2.1 | raw `openssl enc -pbkdf2 -iter 600000` | starts with `Salted__` | cipher not recorded; no authentication |
+| Encryptor 2.0 | raw `openssl enc -pbkdf2 -iter 100000` | starts with `Salted__` | use `--legacy-iter 100000` |
+| Encryptor 2.x | PEM PKCS#7 from `openssl smime -encrypt` | starts with `-----BEGIN PKCS7` | written without `-binary`: line endings in the plaintext may have been converted to CRLF |
+
+A 2.x `.sha256` sidecar, when present, is checked. It is an unkeyed hash: it
+detects accidental corruption only.

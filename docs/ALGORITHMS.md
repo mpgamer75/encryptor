@@ -1,211 +1,125 @@
-# Encryption Algorithms in Encryptor
+# Cryptography in Encryptor 3
 
-This document describes the encryption algorithms available in Encryptor v2.1.0,
-their security properties, appropriate use cases, and implementation details.
+What Encryptor uses, why, and what it deliberately does not claim.
+The byte-level format is in [FORMAT.md](FORMAT.md).
 
----
+## Summary
 
-## Quick Reference
+| Purpose | Algorithm | Standard |
+|---|---|---|
+| Bulk encryption (default) | AES-256-CTR | FIPS 197, SP 800-38A |
+| Bulk encryption (options) | ChaCha20, AES-256-CBC, Camellia-256-CBC, ARIA-256-CBC | RFC 8439, SP 800-38A, RFC 3713, RFC 5794 |
+| Integrity / authentication | HMAC-SHA256, encrypt-then-MAC | FIPS 198-1, RFC 2104 |
+| Password key derivation | PBKDF2-HMAC-SHA256, 600,000 iterations | SP 800-132, RFC 8018 |
+| Subkey derivation | HMAC-SHA256 with fixed labels | — |
+| Recipient key transport | CMS EnvelopedData: RSA-OAEP (SHA-256) or ECDH | RFC 5652, RFC 8017, RFC 5753 |
+| Random numbers | `openssl rand` (OS CSPRNG) | SP 800-90A |
 
-| Algorithm | Type | Authentication | Key Size | Recommended |
-|-----------|------|----------------|----------|-------------|
-| **AES-256-GCM** | Symmetric | ✅ AEAD | 256-bit | ✅ **Default** |
-| **S/MIME** | Asymmetric | ✅ AEAD | RSA 2048-4096 | ✅ For recipients |
-| AES-256-CBC | Symmetric | ❌ None | 256-bit | ⚠ Legacy only |
-| AES-256-CTR | Symmetric | ❌ None | 256-bit | ⚠ Legacy only |
-| ChaCha20 | Symmetric | ❌ None | 256-bit | ⚠ No auth |
-| Camellia-256-CBC | Symmetric | ❌ None | 256-bit | ⚠ Compatibility |
-| ARIA-256-CBC | Symmetric | ❌ None | 256-bit | ⚠ Compatibility |
+Every cipher is combined with HMAC-SHA256, so **every file is authenticated**
+regardless of the cipher chosen. There is no unauthenticated mode for new
+files.
 
-> **What is AEAD?**
-> Authenticated Encryption with Associated Data — the cipher provides both
-> *confidentiality* (data is secret) and *integrity* (data has not been tampered with).
-> Non-AEAD modes only provide confidentiality.
+## Why encrypt-then-MAC instead of AES-GCM
 
----
+The OpenSSL manual is explicit: `openssl enc` "does not support authenticated
+encryption modes like CCM and GCM, and will not support such modes in the
+future." Earlier versions of this project advertised AES-256-GCM; it never
+worked, and the S/MIME path that named it failed on OpenSSL 3.
 
-## Recommended Algorithms
+Encryptor 3 therefore builds authenticated encryption from two primitives the
+OpenSSL command line *does* expose safely:
 
-### AES-256-GCM — Default Recommended
+1. encrypt with a standard cipher (`openssl enc`), then
+2. authenticate the header and the ciphertext with HMAC-SHA256 under an
+   independent key.
 
-**Type:** Symmetric (password-based)
-**Authentication:** ✅ AEAD
-**Key size:** 256-bit
-**Block size:** 128-bit
-**Mode:** Galois/Counter Mode (GCM)
+Encrypt-then-MAC with independent keys is the textbook generic composition
+(Bellare–Namprempre) and is what TLS, SSH and IPsec used for years. The tag is
+verified before decryption starts, which also removes padding-oracle concerns
+for the CBC options.
 
-AES-256-GCM is the gold standard for symmetric encryption in 2024. It is:
-- NIST-approved (FIPS 197 + SP 800-38D)
-- Used in TLS 1.3, SSH, Signal Protocol, and virtually every modern security system
-- Authenticated: decryption will fail if the ciphertext is tampered with
-- Parallelizable for high throughput
-- Hardware-accelerated on Intel (AES-NI) and ARM (ARMv8 Crypto)
+HMAC is implemented from its RFC 2104 definition on top of `openssl dgst` so
+that the key travels through a pipe instead of a command-line argument. The
+result is bit-for-bit identical to `openssl dgst -mac HMAC`; the test suite and
+`encryptor selftest` check this against RFC 4231 vectors and against OpenSSL
+itself.
 
-**Implementation in Encryptor:**
-```
-Key derivation: PBKDF2-HMAC-SHA256, 600,000 iterations, random 8-byte salt
-Encryption:     OpenSSL enc -aes-256-gcm -salt -pbkdf2 -iter 600000
-Password:       Passed via file descriptor (never on command line)
-Integrity:      SHA-256 sidecar file written alongside .enc file
-```
+## Choosing a cipher
 
-**When to use:**
-- Default choice for all new encrypted files
-- Any situation where you need password-based symmetric encryption
+| Cipher | Choose it when |
+|---|---|
+| `aes-256-ctr` (default) | Always, unless you have a reason below. NIST-approved, hardware-accelerated, no padding. |
+| `chacha20` | CPUs without AES instructions (older ARM, some embedded). Not NIST-approved. |
+| `aes-256-cbc` | You want the most conservative, most widely implemented mode. |
+| `camellia-256-cbc` | A policy requires CRYPTREC / Japanese-standard cryptography. |
+| `aria-256-cbc` | A policy requires Korean-standard cryptography. |
 
----
+The security level is the same for all of them in this construction; the
+choice is about policy and performance. The cipher is recorded in the file and
+covered by the tag, so it cannot be swapped by an attacker.
 
-### S/MIME (Certificate-Based) — Recommended for Recipients
+## Password-based keys
 
-**Type:** Asymmetric (certificate/key-based)
-**Authentication:** ✅ AEAD (AES-256-GCM for content encryption)
-**Key wrap:** RSA 2048–4096-bit
-**Standard:** RFC 5751 (S/MIME v3.2)
+PBKDF2-HMAC-SHA256 with **600,000 iterations** — the figure the OWASP Password
+Storage Cheat Sheet gives for this function, and the option OWASP recommends
+when FIPS-140 compliance is required. The iteration count is stored in each
+file, so raising the default later never breaks old files. Override with
+`--iter N` or `ENCRYPTOR_PBKDF2_ITER` (minimum 100,000).
 
-S/MIME encrypts for a specific recipient using their X.509 public certificate.
-Only the holder of the matching private key can decrypt. No shared password is needed.
+**Honest limitation:** PBKDF2 is not memory-hard. Against GPU/ASIC attackers it
+is weaker than scrypt or Argon2id at equal user-visible cost. Memory-hard KDFs
+are not used because the OpenSSL command line offers no way to run them
+without putting the password in the process arguments (`openssl kdf` takes it
+only as `-kdfopt pass:`). Compensate with length: `encryptor passgen` produces
+a 24-character random password (~142 bits), and the interactive UI estimates
+strength and warns below ~45 bits.
 
-**Implementation in Encryptor:**
-```
-Encryption: openssl smime -encrypt -aes256-gcm -outform PEM recipient.pem
-Decryption: openssl smime -decrypt -recip cert.pem -inkey key.pem
-```
+## Certificate recipients
 
-**When to use:**
-- Encrypting files for a specific person or system
-- When no shared secret is possible
-- Email attachments with S/MIME-capable clients (Thunderbird, Outlook)
-- Server-to-server secure file transfer
+A random 256-bit file key is generated per file and wrapped once per
+recipient inside a CMS EnvelopedData structure:
 
----
+- **RSA** certificates: RSA-OAEP with SHA-256 (falls back to the library
+  default key transport only if the OpenSSL build lacks OAEP options).
+- **EC** certificates (P-256, P-384): ephemeral-static ECDH with AES key wrap.
 
-## Legacy / Compatibility Algorithms
+The bulk data is then encrypted exactly as in password mode, so memory use is
+constant for any file size. (Encrypting the whole file as one CMS message, as
+2.x did via `openssl smime`, needs RAM proportional to the file — about 1.1 GB
+for a 400 MB file — and corrupted binary files because `-binary` was missing.)
 
-These algorithms provide **confidentiality only** — they have **no authentication**.
-A tampered or corrupted encrypted file may silently produce garbage output or
-no error at all on decryption.
+The wrapped blob sits in the authenticated header. Recipient mode gives
+confidentiality and integrity but **not sender authentication**: anyone who
+has the certificate can produce a valid file for its owner.
 
-Encryptor writes a SHA-256 integrity sidecar file (`.sha256`) for all modes
-and verifies it before decryption to partially compensate, but this is an
-external check, not built into the cipher.
+## What is not provided
 
-**Use legacy algorithms only for:**
-- Interoperability with older systems that do not support GCM
-- Re-encrypting existing legacy files
+- Digital signatures / proof of origin.
+- Memory-hard password hashing (see above).
+- Chunked streaming AEAD: integrity is checked over the whole file in a first
+  pass, then the file is decrypted in a second pass.
+- Post-quantum key exchange.
+- Hiding file size or recipient identities.
+- A FIPS 140 validation. With an AES cipher, Encryptor uses only approved
+  *algorithms*; whether the module is validated depends on your OpenSSL build
+  and its configuration.
 
-### AES-256-CBC
+## Verifying an installation
 
-**Standard:** NIST FIPS 197 + SP 800-38A
-**Mode:** Cipher Block Chaining
-**Auth:** None — no integrity protection
-**Note:** Susceptible to padding oracle attacks if not used with constant-time
-decryption and MAC verification. Encryptor's PBKDF2 key derivation and SHA-256
-sidecar mitigate but do not eliminate the risk.
-
-### AES-256-CTR
-
-**Mode:** Counter Mode (stream cipher behavior)
-**Auth:** None
-**Note:** Bit-flipping attacks are possible. Nonce reuse is catastrophic.
-OpenSSL manages the nonce internally, but there is no authentication guarantee.
-
-### ChaCha20
-
-**Origin:** D.J. Bernstein, 2008
-**Standard:** RFC 7539
-**Auth:** None (ChaCha20-Poly1305 would provide AEAD — planned for a future release)
-**Note:** Excellent performance on platforms without AES hardware acceleration.
-
-### Camellia-256-CBC
-
-**Origin:** NTT and KDDI (Japan), 2000
-**Standard:** ISO/IEC 18033-3, RFC 3713
-**Auth:** None
-**Security:** Equivalent to AES-256 by design. No known practical attacks.
-**When to use:** Compliance requirements mandating Japanese national cryptography standards.
-
-### ARIA-256-CBC
-
-**Origin:** NSRI / KISA (South Korea), 2003
-**Standard:** ISO/IEC 18033-3, RFC 5794
-**Auth:** None
-**Security:** Equivalent to AES-256. No known practical attacks.
-**When to use:** Compliance requirements mandating Korean national cryptography standards.
-
----
-
-## Key Derivation
-
-All password-based algorithms use **PBKDF2-HMAC-SHA256** for key derivation:
-
-| Parameter | Value | Standard |
-|-----------|-------|----------|
-| Algorithm | PBKDF2-HMAC-SHA256 | NIST SP 800-132 |
-| Iterations | **600,000** | OWASP 2024 recommendation |
-| Salt | 8 bytes random | OpenSSL default |
-| Output key length | 256 bits | Matches cipher key size |
-
-> **Why 600,000 iterations?**
-> OWASP's [Password Storage Cheat Sheet (2024)](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
-> recommends 600,000 iterations for PBKDF2-HMAC-SHA256. This raises the cost
-> of brute-force attacks while remaining fast enough for interactive use
-> (approximately 0.5 to 2 seconds on modern hardware).
-
----
-
-## Integrity Verification
-
-For all encryption operations, Encryptor writes a SHA-256 hash file alongside
-the encrypted output:
-
-```
-myfile.txt         ->  myfile.txt.enc
-                       myfile.txt.enc.sha256
+```bash
+encryptor selftest
 ```
 
-Before decryption, Encryptor:
-1. Reads the `.sha256` sidecar
-2. Computes the current SHA-256 of the `.enc` file
-3. Compares them — failure aborts decryption with a warning
-
-The user can override the integrity check, but this is not recommended.
-
----
-
-## Password Security
-
-Passwords are **never** passed on the command line. Encryptor writes the password
-to a temporary file in a mode-600 file inside `/tmp/encryptor_$$` (which is
-cleaned up on exit via `trap`), then passes `file:/path` to OpenSSL.
-
-This means the password does NOT appear in:
-- `ps aux` / `ps -ef` output
-- `/proc/<pid>/cmdline`
-- Shell history (it is always read interactively via `read -rs`)
-- OpenSSL error messages
-
----
-
-## Algorithm Comparison
-
-| Property | AES-256-GCM | AES-256-CBC | ChaCha20 | S/MIME |
-|----------|-------------|-------------|----------|--------|
-| Confidentiality | Yes | Yes | Yes | Yes |
-| Integrity (AEAD) | Yes | No | No | Yes |
-| Hardware accel | Yes | Yes | Yes | Yes |
-| NIST approved | Yes | Yes | No | Yes |
-| No shared secret | No | No | No | Yes |
-| Padding attacks | N/A | Risk | N/A | N/A |
-
----
+runs known-answer tests (HMAC-SHA256 from RFC 4231, a PBKDF2-HMAC-SHA256
+vector checked against an independent implementation), a full encrypt/decrypt
+round trip, and a tamper test. The installer runs it automatically and refuses
+to declare success if it fails.
 
 ## References
 
-- [NIST FIPS 197 — AES](https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf)
-- [NIST SP 800-38D — GCM](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38d.pdf)
-- [NIST SP 800-132 — Key Derivation](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-132.pdf)
-- [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
-- [RFC 5751 — S/MIME v3.2](https://www.rfc-editor.org/rfc/rfc5751)
-- [RFC 7539 — ChaCha20-Poly1305](https://www.rfc-editor.org/rfc/rfc7539)
-- [RFC 3713 — Camellia](https://www.rfc-editor.org/rfc/rfc3713)
-- [RFC 5794 — ARIA](https://www.rfc-editor.org/rfc/rfc5794)
+- OpenSSL `enc` manual: <https://docs.openssl.org/master/man1/openssl-enc/>
+- OpenSSL passphrase options: <https://docs.openssl.org/master/man1/openssl-passphrase-options/>
+- OWASP Password Storage Cheat Sheet: <https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html>
+- NIST SP 800-132 (password-based key derivation), SP 800-38A (block cipher modes), FIPS 198-1 (HMAC)
+- RFC 2104 / RFC 4231 (HMAC, test vectors), RFC 8018 (PBKDF2), RFC 5652 (CMS), RFC 8017 (RSA-OAEP)
+- Bellare, Namprempre: *Authenticated Encryption: Relations among notions and analysis of the generic composition paradigm*

@@ -6,6 +6,98 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.0.0] — 2026-11-13
+
+A security-driven rewrite. New files use a new, authenticated format; files
+written by 2.x remain readable.
+
+### Security
+
+- **New authenticated container, ENCRYPTOR/3.** Cipher + HMAC-SHA256
+  (encrypt-then-MAC) with a self-describing, versioned header. The tag covers
+  the header and the ciphertext and is verified before any plaintext is
+  written. A wrong password is now always detected. Specification:
+  `docs/FORMAT.md`.
+- **Secrets never touch the disk or argv.** Passwords and keys are handed to
+  OpenSSL through anonymous pipes (`-pass fd:N`) instead of a file in `/tmp`.
+- **Certificate encryption actually works, and scales.** A random file key is
+  wrapped with CMS (RSA-OAEP / ECDH) for one or more recipients; the data is
+  encrypted as a stream (constant memory). Replaces the `openssl smime` path,
+  which failed silently on OpenSSL 3, corrupted binary files, and needed RAM
+  proportional to the file size.
+- **Strict input validation.** Cipher allow-list (`--algo none` is refused),
+  bounded iteration counts, safe store names, escaped certificate subjects,
+  validated TLS scan targets, sanitised log lines, RFC 8259 JSON escaping.
+- **Private by default.** `umask 077`; outputs 0600; state directory 0700;
+  log 0600; `mktemp -d` temporary directory; atomic writes; no silent
+  overwrite (`--force` required).
+- **Signal-safe cleanup** on SIGINT/SIGTERM/SIGHUP, including partial outputs.
+- **testssl.sh** is installed from a pinned release tag; a system-wide
+  installation is used when present.
+- **Installer** no longer trusts files in the current directory, supports a
+  pinned ref with checksum verification, never edits shell profiles, never
+  calls `sudo`.
+- The false "AES-256-GCM" claims were removed from all documentation.
+
+### Added
+
+- Sub-commands: `encrypt`, `decrypt`, `inspect`, `verify`, `certs`, `audit`,
+  `selftest`, `passgen`, `completion`.
+- Multiple recipients (`-r` repeated), EC certificates, encrypted private keys
+  (`--key-pass-file`).
+- stdin/stdout (`-`), multiple input files, `--shred` (verifies the encrypted
+  copy before deleting the original), `--force`, `--quiet`, `--no-color`.
+- Password sources: `--pass-file`, `--pass-env`, `--pass-stdin`, terminal prompt.
+- Stable exit codes (0–6, 130) and a richer `--json` schema.
+- `encryptor selftest`: HMAC-SHA256 (RFC 4231) and PBKDF2 known-answer tests,
+  round trip and tamper detection. Run by the installer and the audit.
+- Automatic format detection on decryption; reads 2.0 and 2.1 files
+  (`--legacy-iter`) and 2.x S/MIME files.
+- PKI: quick identity, certificate import with fingerprint confirmation,
+  ECDSA P-256/P-384 and RSA 3072/4096 keys, optional key passphrase, signing
+  profiles (identity/server/client) with correct X.509v3 extensions and SANs,
+  random serials, chain verification, PKCS#12 with AES-256/PBKDF2/SHA-256.
+- `encryptor certs [--json] [--warn-days N]` for expiry monitoring.
+- Audit: 15 checks, JSON output, non-zero exit on failure.
+- Operation log rotation; `ENCRYPTOR_NO_LOG`.
+- Shell completion (bash, zsh). Man page rewritten.
+- Test suite `tests/run.sh` (100+ assertions) and a release workflow.
+
+### Changed
+
+- **Interactive UI rebuilt:** arrow-key menus with shortcuts, file browser
+  with type-to-filter and TAB completion, step indicator, password strength
+  meter and generator, progress bar, result panels, certificate dashboard,
+  colour-coded audit. Uses the alternate screen; honours `NO_COLOR`; ASCII
+  fallback.
+- **Architecture:** engine (`lib/crypto.sh`, `pki_*`, `audit_*`) separated
+  from presentation (`lib/tui.sh`, `lib/cli.sh`); new `lib/core.sh`. The CLI
+  and the UI call the same engine functions. `lib/` is located at run time —
+  no more `sed` patching of the installed script.
+- Default cipher is `aes-256-ctr` (+ HMAC-SHA256).
+- Decryption writes `FILE` instead of `FILE.dec`.
+- `.deb` installs to `/usr/bin` and `/usr/lib/encryptor`; the RPM spec uses
+  `/usr/lib/encryptor`.
+- Timestamps in the log are ISO 8601 UTC.
+
+### Removed
+
+- `.sha256` sidecar files (superseded by the in-file keyed tag). Existing
+  sidecars next to legacy files are still checked.
+- Writing the 2.x formats.
+
+### Migration
+
+1. Upgrade.
+2. `encryptor audit` in directories holding encrypted files lists legacy ones.
+3. Decrypt each legacy file (`--algo`, and `--legacy-iter 100000` for 2.0
+   files) and encrypt it again.
+4. Scripts: `--encrypt/--decrypt FILE --pass-file … --output …` keeps working.
+   Check anything that relied on the `.dec` suffix, on `.sha256` files, or on
+   silent overwriting.
+
+---
+
 ## [2.1.0] — 2026-03-22
 
 ### Security — Critical fixes
@@ -139,5 +231,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+[3.0.0]: https://github.com/mpgamer75/encryptor/compare/v2.1.0...v3.0.0
 [2.1.0]: https://github.com/mpgamer75/encryptor/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/mpgamer75/encryptor/releases/tag/v2.0.0

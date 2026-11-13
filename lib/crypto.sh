@@ -118,8 +118,17 @@ crypto_part_path() {
         # substitution, where creating it would leak an untracked directory.
         printf '%s' "$TEMP_DIR/stdout.part"
     else
-        printf '%s' "${1}.encryptor-part.$$"
+        printf '%s' "${1}.encryptor-part.$$.${RANDOM}${RANDOM}"
     fi
+}
+
+# Create the in-progress file exclusively (O_EXCL via noclobber): refuses to
+# follow a pre-existing file or symlink planted under that name in a shared
+# directory. Registers it for removal on abnormal exit.
+_crypto_part_create() {
+    local part="$1"
+    if ! ( set -o noclobber; : > "$part" ) 2>/dev/null; then return 1; fi
+    core_cleanup_add "$part"
 }
 
 # --- Primitives -------------------------------------------------------------
@@ -391,11 +400,9 @@ crypto_encrypt() {
     master=""
 
     local part; part=$(crypto_part_path "$out")
-    core_cleanup_add "$part"
-    core_tmpdir
     local errf="$TEMP_DIR/enc.err" rc=0
-    if ! printf '%s' "$header" 2>/dev/null > "$part"; then
-        core_cleanup_forget "$part"
+    if ! _crypto_part_create "$part" || ! printf '%s' "$header" 2>/dev/null >> "$part"; then
+        rm -f -- "$part" 2>/dev/null; core_cleanup_forget "$part"
         ENC_ERR="Cannot write output: $out"; return "$EX_CANTCREAT"
     fi
 
@@ -542,9 +549,8 @@ crypto_decrypt() {
     fi
 
     local part; part=$(crypto_part_path "$out")
-    core_cleanup_add "$part"
-    if ! : 2>/dev/null > "$part"; then
-        core_cleanup_forget "$part"; ENC_ERR="Cannot write output: $out"; return "$EX_CANTCREAT"
+    if ! _crypto_part_create "$part"; then
+        ENC_ERR="Cannot write output: $out"; return "$EX_CANTCREAT"
     fi
     _crypto_phase decrypt "$part" "${ENC_META[body_len]}"
     head -c "$auth_len" -- "$in" | tail -c "+$(( hdr_len + 1 ))" \
@@ -605,7 +611,8 @@ _crypto_decrypt_legacy_enc() {
             -pass fd:3 3< <(printf '%s\n' "$ENC_SECRET") 2>"$errf"
         rc=$?
     else
-        part=$(crypto_part_path "$out"); core_cleanup_add "$part"
+        part=$(crypto_part_path "$out")
+        _crypto_part_create "$part" || { ENC_ERR="Cannot write output: $out"; return "$EX_CANTCREAT"; }
         openssl enc -d "-$algo" -pbkdf2 -iter "$iter" -md sha256 -in "$in" \
             -pass fd:3 3< <(printf '%s\n' "$ENC_SECRET") > "$part" 2>"$errf"
         rc=$?
@@ -634,7 +641,12 @@ _crypto_decrypt_legacy_smime() {
     [[ -n "$ENC_CERT_FILE" ]] && args+=(-recip "$ENC_CERT_FILE")
     core_tmpdir
     local errf="$TEMP_DIR/dec.err" rc part target
-    if [[ "$out" == "-" ]]; then target="/dev/stdout"; else part=$(crypto_part_path "$out"); core_cleanup_add "$part"; target="$part"; fi
+    if [[ "$out" == "-" ]]; then target="/dev/stdout"
+    else
+        part=$(crypto_part_path "$out")
+        _crypto_part_create "$part" || { ENC_ERR="Cannot write output: $out"; return "$EX_CANTCREAT"; }
+        target="$part"
+    fi
     if [[ -n "$ENC_KEY_SECRET" ]]; then
         openssl smime "${args[@]}" -passin fd:4 4< <(printf '%s\n' "$ENC_KEY_SECRET") > "$target" 2>"$errf"; rc=$?
     else
@@ -661,6 +673,10 @@ _crypto_decrypt_legacy_smime() {
 SECURE_DELETE_METHOD=""
 secure_delete() {
     local file="$1"
+    if [[ -L "$file" ]]; then
+        ENC_ERR="$file is a symbolic link; refusing to overwrite its target. Delete the target explicitly."
+        return "$EX_FAIL"
+    fi
     [[ -f "$file" ]] || { ENC_ERR="Not a regular file: $file"; return "$EX_NOINPUT"; }
     if have shred; then
         if shred -u -z -n 2 -- "$file" 2>/dev/null; then SECURE_DELETE_METHOD="shred (2 random passes + zero pass)"; return 0; fi
@@ -700,14 +716,12 @@ crypto_password_bits() {
     (( pool == 0 )) && { printf '0'; return; }
     # log2(pool) in tenths of a bit, integer arithmetic.
     local l2
-    case 1 in
-        $(( pool <= 10 )))  l2=33 ;;
-        $(( pool <= 26 )))  l2=47 ;;
-        $(( pool <= 36 )))  l2=51 ;;
-        $(( pool <= 52 )))  l2=57 ;;
-        $(( pool <= 62 )))  l2=59 ;;
-        *)                  l2=65 ;;
-    esac
+    if   (( pool <= 10 )); then l2=33
+    elif (( pool <= 26 )); then l2=47
+    elif (( pool <= 36 )); then l2=51
+    elif (( pool <= 52 )); then l2=57
+    elif (( pool <= 62 )); then l2=59
+    else                        l2=65; fi
     printf '%d' $(( ${#pw} * l2 / 10 ))
 }
 

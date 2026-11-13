@@ -40,7 +40,7 @@ audit_run() {
 
     # 2. Shell
     if (( BASH_VERSINFO[0] >= 5 )); then _audit_add bash pass "Bash version" "$BASH_VERSION"
-    else _audit_add bash warn "Bash version" "$BASH_VERSION — works, but 5.x is recommended." "Upgrade bash"; fi
+    else _audit_add bash warn "Bash version" "$BASH_VERSION — supported, but 5.x is recommended." "Upgrade bash"; fi
 
     # 3. Engine self-test (known-answer tests + round trip + tamper detection)
     if crypto_selftest; then
@@ -68,20 +68,20 @@ audit_run() {
     if [[ "$mode" != "700" ]]; then _audit_add cert-dir-perms fail "Key store directory" "$CERT_DIR has mode ${mode:-?}." "chmod 700 '$CERT_DIR'"; fi
 
     # 7. Private keys: permissions and passphrase protection
-    local k total=0 loose="" plain=0
+    local k total=0 loose="" unprotected=0
     for k in "$CERT_DIR"/*.key; do
         [[ -f "$k" ]] || continue
         (( total++ ))
         mode=$(get_file_mode "$k")
         [[ "$mode" == "400" || "$mode" == "600" ]] || loose+="$(basename "$k")($mode) "
-        crypto_key_is_encrypted "$k" || (( plain++ ))
+        crypto_key_is_encrypted "$k" || (( unprotected++ ))
     done
     if (( total == 0 )); then _audit_add key-perms info "Private key permissions" "No private keys in the store."
     elif [[ -z "$loose" ]]; then _audit_add key-perms pass "Private key permissions" "All $total key(s) are owner-only (400/600)."
     else _audit_add key-perms fail "Private key permissions" "Readable by others: ${loose% }" "chmod 400 '$CERT_DIR'/*.key"; fi
     if (( total > 0 )); then
-        if (( plain == 0 )); then _audit_add key-encryption pass "Private key protection" "All $total key(s) are passphrase-protected."
-        else _audit_add key-encryption warn "Private key protection" "$plain of $total key(s) are stored without a passphrase." "openssl pkey -in KEY -aes-256-cbc -out KEY.new"; fi
+        if (( unprotected == 0 )); then _audit_add key-encryption pass "Private key protection" "All $total key(s) are passphrase-protected."
+        else _audit_add key-encryption warn "Private key protection" "$unprotected of $total key(s) are stored without a passphrase." "openssl pkey -in KEY -aes-256-cbc -out KEY.new"; fi
     fi
 
     # 8. Certificates: expiry and strength

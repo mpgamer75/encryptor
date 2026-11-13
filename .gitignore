@@ -1,0 +1,4 @@
+debian/tmp/
+encryptor_*.deb
+encryptor-*.tar.gz
+SHA256SUMS

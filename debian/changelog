@@ -1,3 +1,14 @@
+encryptor (3.0.0-1) unstable; urgency=medium
+
+  * New authenticated container format ENCRYPTOR/3 (encrypt-then-MAC).
+  * Secrets passed to openssl over pipes; nothing on disk or in argv.
+  * Certificate recipients via CMS key wrap, multiple recipients.
+  * New command-line interface, terminal UI, PKI profiles, audit and tests.
+  * Package now installs to /usr/bin and /usr/lib/encryptor.
+  * See CHANGELOG.md for the complete list.
+
+ -- mpgamer75 <mpgamer75@github.com>  Fri, 13 Nov 2026 12:00:00 +0000
+
 encryptor (2.0.0-1) unstable; urgency=medium
   * Major release with modern cryptographic algorithms
   * Added AES-256-CBC, AES-256-CTR, ChaCha20, Camellia-256, ARIA-256

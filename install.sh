@@ -1,607 +1,171 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# ==============================================================================
+# Encryptor installer
+#
+#   From a checkout:   ./install.sh
+#   From the network:  curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
+#
+# Environment:
+#   PREFIX            install prefix (default: /usr/local as root, ~/.local otherwise)
+#   ENCRYPTOR_REF     git tag / branch / commit to download (default: main).
+#                     Pin a release tag for reproducible installs, e.g. v3.0.0
+#   ENCRYPTOR_SHA256  expected SHA-256 of the downloaded tarball (optional but
+#                     recommended with a pinned ENCRYPTOR_REF)
+#
+# Layout:  $PREFIX/bin/encryptor
+#          $PREFIX/lib/encryptor/*.sh
+#          $PREFIX/share/man/man1/encryptor.1
+#          $PREFIX/share/bash-completion/completions/encryptor
+#
+# The installer never edits your shell start-up files and never uses sudo.
+# ==============================================================================
+set -euo pipefail
 
-# Encryptor Installation Script - v2.1.0
-set -eo pipefail
+REPO="mpgamer75/encryptor"
+REF="${ENCRYPTOR_REF:-main}"
+MODULES=(core ui crypto certs audit tui cli)
 
-# Colors
-RED="\e[31m"
-GREEN="\e[32m"
-YELLOW="\e[33m"
-BLUE="\e[34m"
-CYAN="\e[36m"
-BOLD="\e[1m"
-RESET="\e[0m"
-DIM="\e[2m"
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; C=$'\e[36m'; N=$'\e[0m'
+else
+    B=""; G=""; Y=""; R=""; C=""; N=""
+fi
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '%s!%s %s\n' "$Y" "$N" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 
-# Constants
-VERSION="2.1.0"
-SCRIPT_NAME="encryptor.sh"
-BINARY_NAME="encryptor"
-GITHUB_URL="https://raw.githubusercontent.com/mpgamer75/encryptor/main"
-LIB_MODULES=("ui.sh" "crypto.sh" "certs.sh" "audit.sh")
+usage() {
+    cat <<EOF
+Encryptor installer
 
-print_header() {
-    echo -e "${CYAN}${BOLD}"
-    cat << 'EOF'
-    ______                             __            
-   / ____/___  ____________  ______  / /_____  _____
-  / __/ / __ \/ ___/ ___/ / / / __ \/ __/ __ \/ ___/
- / /___/ / / / /__/ /  / /_/ / /_/ / /_/ /_/ / /    
-/_____/_/ /_/\___/_/   \__, / .___/\__/\____/_/     
-                      /____/_/                       
+Usage: install.sh [--prefix DIR] [--help]
+
+  --prefix DIR   Install under DIR (same as PREFIX=DIR)
+  --help         Show this help
+
+Environment: PREFIX, ENCRYPTOR_REF, ENCRYPTOR_SHA256 (see the header of this script).
 EOF
-    echo -e "${RESET}"
-    echo -e "${GREEN}${BOLD}                   Encryptor Installer v$VERSION${RESET}"
-    echo -e "${BLUE}                      Advanced File Encryption${RESET}"
-    echo
-    echo -e "${CYAN}═══════════════════════════════════════════════════════════════════${RESET}"
-    echo
 }
 
-detect_distro() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS_NAME="$ID"
-        OS_VERSION="$VERSION_ID"
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        OS_NAME="macos"
-        OS_VERSION=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
-    else
-        OS_NAME="unknown"
-        OS_VERSION="unknown"
-    fi
-}
-
-check_openssl_capabilities() {
-    local ssl_version="$1"
-    local has_cms=0
-    local has_aead=0
-    
-    # Test CMS support
-    if openssl cms -help 2>&1 | grep -q "encrypt" 2>/dev/null; then
-        has_cms=1
-    fi
-    
-    # Test AEAD support (check if ciphers command lists AEAD ciphers)
-    if openssl enc -ciphers 2>/dev/null | grep -q "aes-256-gcm\|chacha20-poly1305" 2>/dev/null; then
-        has_aead=1
-    fi
-    
-    echo "$has_cms:$has_aead"
-}
-
-suggest_openssl_upgrade() {
-    local ssl_version="$1"
-    
-    echo
-    echo -e "${YELLOW}${BOLD}⚠️  OpenSSL Upgrade Recommended${RESET}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    echo
-    echo -e "${BLUE}Current version:${RESET} OpenSSL $ssl_version"
-    echo -e "${BLUE}Recommended:${RESET}     OpenSSL 1.1.1+ or 3.x"
-    echo
-    echo -e "${CYAN}${BOLD}Why upgrade?${RESET}"
-    echo -e "  ${GREEN}✓${RESET} Modern AEAD ciphers (AES-256-GCM, ChaCha20-Poly1305)"
-    echo -e "  ${GREEN}✓${RESET} Enhanced security features"
-    echo -e "  ${GREEN}✓${RESET} Better performance with hardware acceleration"
-    echo -e "  ${GREEN}✓${RESET} Full CMS (Cryptographic Message Syntax) support"
-    echo
-    echo -e "${CYAN}${BOLD}Without upgrade:${RESET}"
-    echo -e "  ${YELLOW}→${RESET} Encryptor will use AES-256-CBC (still very secure)"
-    echo -e "  ${YELLOW}→${RESET} Some modern encryption modes unavailable"
-    echo
-    
-    case "$OS_NAME" in
-        ubuntu|debian)
-            local version_major="${OS_VERSION%%.*}"
-            echo -e "${CYAN}${BOLD}Upgrade instructions for Ubuntu/Debian:${RESET}"
-            
-            if [[ "$OS_NAME" == "ubuntu" ]] && [[ "$version_major" -ge 20 ]] || [[ "$OS_NAME" == "debian" ]] && [[ "$version_major" -ge 11 ]]; then
-                echo -e "${BOLD}sudo apt update${RESET}"
-                echo -e "${BOLD}sudo apt install --upgrade openssl libssl-dev${RESET}"
-            else
-                echo -e "${YELLOW}Your OS version may have older OpenSSL in repositories.${RESET}"
-                echo -e "${BOLD}sudo apt update${RESET}"
-                echo -e "${BOLD}sudo apt install --upgrade openssl${RESET}"
-                echo
-                echo -e "${DIM}Or compile from source:${RESET}"
-                echo -e "${BOLD}wget https://www.openssl.org/source/openssl-3.0.12.tar.gz${RESET}"
-                echo -e "${BOLD}tar -xzf openssl-3.0.12.tar.gz${RESET}"
-                echo -e "${BOLD}cd openssl-3.0.12${RESET}"
-                echo -e "${BOLD}./config --prefix=/usr/local/ssl --openssldir=/usr/local/ssl shared zlib${RESET}"
-                echo -e "${BOLD}make -j\$(nproc)${RESET}"
-                echo -e "${BOLD}sudo make install${RESET}"
-            fi
-            ;;
-        
-        centos|rhel|fedora|rocky|almalinux)
-            echo -e "${CYAN}${BOLD}Upgrade instructions for CentOS/RHEL/Fedora:${RESET}"
-            if [[ "$OS_NAME" == "fedora" ]]; then
-                echo -e "${BOLD}sudo dnf update openssl openssl-libs${RESET}"
-            else
-                local version_major="${OS_VERSION%%.*}"
-                if [[ "$version_major" -ge 8 ]]; then
-                    echo -e "${BOLD}sudo dnf update openssl openssl-libs${RESET}"
-                else
-                    echo -e "${BOLD}sudo yum update openssl openssl-libs${RESET}"
-                    echo
-                    echo -e "${YELLOW}Note: RHEL/CentOS 7 has OpenSSL 1.0.2 by default.${RESET}"
-                    echo -e "${YELLOW}Consider upgrading to RHEL/CentOS 8+ for modern OpenSSL.${RESET}"
-                fi
-            fi
-            ;;
-        
-        arch|manjaro)
-            echo -e "${CYAN}${BOLD}Upgrade instructions for Arch Linux:${RESET}"
-            echo -e "${BOLD}sudo pacman -Syu openssl${RESET}"
-            ;;
-        
-        opensuse*|sles)
-            echo -e "${CYAN}${BOLD}Upgrade instructions for openSUSE/SLES:${RESET}"
-            echo -e "${BOLD}sudo zypper update openssl libopenssl${RESET}"
-            ;;
-        
-        macos)
-            echo -e "${CYAN}${BOLD}Upgrade instructions for macOS:${RESET}"
-            if command -v brew >/dev/null 2>&1; then
-                echo -e "${BOLD}brew update${RESET}"
-                echo -e "${BOLD}brew install openssl@3${RESET}"
-                echo -e "${BOLD}brew link --force openssl@3${RESET}"
-                echo
-                echo -e "${YELLOW}Note: You may need to update your PATH:${RESET}"
-                echo -e "${BOLD}echo 'export PATH=\"/usr/local/opt/openssl@3/bin:\$PATH\"' >> ~/.zshrc${RESET}"
-                echo -e "${BOLD}source ~/.zshrc${RESET}"
-            else
-                echo -e "${YELLOW}Homebrew not found. Install it first:${RESET}"
-                echo -e "${BOLD}/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"${RESET}"
-            fi
-            ;;
-        
-        *)
-            echo -e "${CYAN}${BOLD}Generic upgrade instructions:${RESET}"
-            echo -e "${YELLOW}Use your distribution's package manager to upgrade OpenSSL${RESET}"
-            echo
-            echo -e "${DIM}Or compile from source:${RESET}"
-            echo -e "${BOLD}wget https://www.openssl.org/source/openssl-3.0.12.tar.gz${RESET}"
-            echo -e "${BOLD}tar -xzf openssl-3.0.12.tar.gz && cd openssl-3.0.12${RESET}"
-            echo -e "${BOLD}./config && make -j\$(nproc) && sudo make install${RESET}"
-            ;;
+PREFIX="${PREFIX:-}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --prefix)   [[ $# -ge 2 ]] || die "--prefix requires a directory"; PREFIX="$2"; shift 2 ;;
+        --help|-h)  usage; exit 0 ;;
+        *)          die "unknown option: $1 (try --help)" ;;
     esac
-    
-    echo
-    echo -e "${CYAN}${BOLD}Continue installation anyway?${RESET}"
-    echo -e "${YELLOW}Encryptor will work with fallback to AES-256-CBC${RESET}"
-    echo -en "${BOLD}[Y/n]: ${RESET}"
-    read -r response
-    
-    if [[ "$response" =~ ^[Nn]$ ]]; then
-        echo -e "${BLUE}Installation cancelled. Upgrade OpenSSL and run installer again.${RESET}"
-        exit 0
-    fi
-    
-    echo -e "${GREEN}Continuing installation...${RESET}"
-    echo
-}
+done
+if [[ -z "$PREFIX" ]]; then
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then PREFIX="/usr/local"; else PREFIX="${HOME}/.local"; fi
+fi
 
-check_requirements() {
-    echo -e "${BLUE}Checking system requirements...${RESET}"
-    local missing_pkg=0
-    
-    # Detect distribution
-    detect_distro
-    echo -e "${DIM}Detected OS: $OS_NAME $OS_VERSION${RESET}"
-    
-    # Check Bash
-    if ! command -v bash >/dev/null 2>&1; then
-        echo -e "${RED}Error: Bash not found${RESET}"
-        missing_pkg=1
-    else
-        bash_version=$(bash --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
-        echo -e "${GREEN}✅ Bash $bash_version detected${RESET}"
-    fi
-    
-    # Check OpenSSL with detailed capabilities
-    if ! command -v openssl >/dev/null 2>&1; then
-        echo -e "${RED}❌ Error: OpenSSL not found${RESET}"
-        missing_pkg=1
-    else
-        ssl_version=$(openssl version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-        local major; major=$(echo "$ssl_version" | cut -d. -f1)
-        local minor; minor=$(echo "$ssl_version" | cut -d. -f2)
+say "${C}${B}Encryptor installer${N}"
+say "Prefix: ${B}${PREFIX}${N}"
+say
 
-        # Check capabilities
-        local capabilities; capabilities=$(check_openssl_capabilities "$ssl_version")
-        local has_cms; has_cms=$(echo "$capabilities" | cut -d: -f1)
-        local has_aead; has_aead=$(echo "$capabilities" | cut -d: -f2)
-        
-        echo -e "${GREEN}✅ OpenSSL $ssl_version detected${RESET}"
-        
-        # Display capabilities
-        if [[ "$has_cms" -eq 1 ]]; then
-            echo -e "   ${GREEN}✓${RESET} ${DIM}CMS (Cryptographic Message Syntax) supported${RESET}"
-        else
-            echo -e "   ${YELLOW}○${RESET} ${DIM}CMS not available${RESET}"
-        fi
-        
-        # Check version and suggest upgrade
-        local needs_upgrade=0
-        if [[ "$major" -lt 1 ]] || [[ "$major" -eq 1 && "$minor" -eq 0 ]]; then
-            needs_upgrade=1
-            echo -e "   ${YELLOW}⚠${RESET}  ${DIM}Modern AEAD ciphers not fully supported${RESET}"
-        elif [[ "$major" -eq 1 && "$minor" -eq 1 ]]; then
-            echo -e "   ${GREEN}✓${RESET} ${DIM}AEAD ciphers supported (OpenSSL 1.1.x)${RESET}"
-        else
-            echo -e "   ${GREEN}✓${RESET} ${DIM}Full modern cryptography support (OpenSSL $major.x)${RESET}"
-        fi
-        
-        # Suggest upgrade if old version
-        if [[ "$needs_upgrade" -eq 1 ]]; then
-            suggest_openssl_upgrade "$ssl_version"
-        fi
-    fi
-    
-    # Check Git (for testssl.sh)
-    if ! command -v git >/dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  'git' not found (required for audit tools)${RESET}"
-        echo -e "${DIM}   Security audit features will be unavailable${RESET}"
-    else
-        echo -e "${GREEN}✅ 'git' detected${RESET}"
-    fi
-    
-    # Check numfmt (coreutils)
-    if ! command -v numfmt >/dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  'numfmt' not found (part of coreutils)${RESET}"
-        echo -e "${DIM}   File size formatting will be basic${RESET}"
-    else
-        echo -e "${GREEN}✅ 'numfmt' detected${RESET}"
-    fi
-    
-    # Check less
-    if ! command -v less >/dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️  'less' not found (for viewing logs)${RESET}"
-        echo -e "${DIM}   Log viewing with 'cat' fallback${RESET}"
-    else
-        echo -e "${GREEN}✅ 'less' detected${RESET}"
-    fi
-    
-    if [[ $missing_pkg -ne 0 ]]; then
-        echo
-        echo -e "${RED}${BOLD}Critical packages missing!${RESET}"
-        echo -e "${YELLOW}Please install required packages:${RESET}"
-        echo
-        case "$OS_NAME" in
-            ubuntu|debian)
-                echo -e "  ${BOLD}sudo apt update${RESET}"
-                echo -e "  ${BOLD}sudo apt install bash openssl git coreutils less${RESET}"
-                ;;
-            centos|rhel|fedora|rocky|almalinux)
-                if [[ "$OS_NAME" == "fedora" ]] || [[ "${OS_VERSION%%.*}" -ge 8 ]]; then
-                    echo -e "  ${BOLD}sudo dnf install bash openssl git coreutils less${RESET}"
-                else
-                    echo -e "  ${BOLD}sudo yum install bash openssl git coreutils less${RESET}"
-                fi
-                ;;
-            arch|manjaro)
-                echo -e "  ${BOLD}sudo pacman -S bash openssl git coreutils less${RESET}"
-                ;;
-            opensuse*|sles)
-                echo -e "  ${BOLD}sudo zypper install bash openssl git coreutils less${RESET}"
-                ;;
-            macos)
-                echo -e "  ${BOLD}brew install bash openssl git coreutils less${RESET}"
-                ;;
-            *)
-                echo -e "  ${BOLD}Use your package manager to install: bash openssl git coreutils less${RESET}"
-                ;;
-        esac
-        exit 1
-    fi
-    echo
-}
+# --- Requirements -------------------------------------------------------------
+(( BASH_VERSINFO[0] > 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4 ) )) || die "Bash 4.4+ is required (found ${BASH_VERSION}). On macOS: brew install bash"
+ok "Bash ${BASH_VERSION}"
+command -v openssl >/dev/null 2>&1 || die "OpenSSL is required. Install it with your package manager (e.g. apt install openssl)."
+if ! openssl enc -aes-256-ctr -pbkdf2 -iter 1 -md sha256 -pass pass:probe </dev/null >/dev/null 2>&1; then
+    die "$(openssl version) does not support PBKDF2 key derivation. OpenSSL 1.1.1 or newer is required (3.x recommended)."
+fi
+ok "$(openssl version | awk '{print $1, $2}')"
+for tool in head tail od tr sed awk mktemp stat; do
+    command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
+done
 
-detect_shell() {
-    user_shell=$(basename "${SHELL:-bash}")
-    config_file=""
-    
-    echo -e "${BLUE}Detecting shell configuration...${RESET}"
-    
-    case "$user_shell" in
-        "zsh")
-            config_file="$HOME/.zshrc"
-            ;;
-        "bash")
-            if [[ -f "$HOME/.bashrc" ]]; then
-                config_file="$HOME/.bashrc"
-            elif [[ -f "$HOME/.bash_profile" ]]; then
-                config_file="$HOME/.bash_profile"
-            else
-                config_file="$HOME/.bashrc" # Default
-            fi
-            ;;
-        "fish")
-            config_file="$HOME/.config/fish/config.fish"
-            ;;
-        *)
-            config_file="$HOME/.profile" # Fallback
-            ;;
-    esac
-    
-    echo -e "${GREEN}✅ Shell: ${BOLD}$user_shell${RESET}"
-    echo -e "${BLUE}Config file: ${BOLD}$config_file${RESET}"
-    echo
-}
+# --- Locate the sources -------------------------------------------------------
+# Only a real checkout next to this script is trusted as a local source. When
+# the script is piped from the network there is no script path, so files that
+# merely happen to exist in the current directory are never installed.
+SRC=""
+WORK=""
+cleanup() { [[ -n "$WORK" && -d "$WORK" ]] && rm -rf -- "$WORK"; return 0; }
+trap cleanup EXIT
 
-_fetch() {
-    local url="$1" dest="$2"
+self="${BASH_SOURCE[0]:-}"
+if [[ -n "$self" && -f "$self" ]]; then
+    self_dir="$(cd -P "$(dirname "$self")" && pwd)"
+    if [[ -f "$self_dir/encryptor.sh" && -f "$self_dir/lib/core.sh" ]]; then SRC="$self_dir"; fi
+fi
+
+if [[ -n "$SRC" ]]; then
+    ok "Installing from local checkout: $SRC"
+else
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/encryptor-install.XXXXXXXX")"
+    url="https://github.com/${REPO}/archive/${REF}.tar.gz"
+    say "Downloading ${url}"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$url" -o "$dest" || return 1
+        curl -fsSL --proto '=https' --tlsv1.2 "$url" -o "$WORK/src.tar.gz" || die "download failed"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "$url" -O "$dest" || return 1
+        wget -q --https-only "$url" -O "$WORK/src.tar.gz" || die "download failed"
     else
-        echo -e "${RED}Error: Neither curl nor wget found${RESET}"
-        exit 1
+        die "curl or wget is required to download Encryptor"
     fi
-}
-
-_verify_sha256() {
-    local file="$1" expected="$2"
-    local actual
-    actual=$(sha256sum "$file" 2>/dev/null | awk '{print $1}' || \
-             shasum -a 256 "$file" 2>/dev/null | awk '{print $1}')
-    if [[ "$actual" != "$expected" ]]; then
-        echo -e "${RED}${BOLD}CHECKSUM MISMATCH for $file!${RESET}"
-        echo -e "${RED}Expected: $expected${RESET}"
-        echo -e "${RED}Actual:   $actual${RESET}"
-        echo -e "${RED}Download may be corrupt or tampered with. Aborting.${RESET}"
-        exit 1
-    fi
-    echo -e "${GREEN}  ✓ Checksum OK: $(basename "$file")${RESET}"
-}
-
-download_script() {
-    echo -e "${BLUE}Downloading Encryptor v${VERSION}...${RESET}"
-
-    local _tmp_dir
-    _tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$_tmp_dir"' RETURN
-
-    # Download main script
-    if [[ -f "$SCRIPT_NAME" ]]; then
-        echo -e "${GREEN}✅ Found local $SCRIPT_NAME — skipping download${RESET}"
+    [[ -s "$WORK/src.tar.gz" ]] || die "downloaded archive is empty"
+    actual="$(openssl dgst -sha256 -r "$WORK/src.tar.gz" | awk '{print $1}')"
+    if [[ -n "${ENCRYPTOR_SHA256:-}" ]]; then
+        [[ "${ENCRYPTOR_SHA256,,}" == "$actual" ]] || die "checksum mismatch: expected ${ENCRYPTOR_SHA256}, got ${actual}"
+        ok "Checksum verified"
     else
-        echo -e "${BLUE}Downloading $SCRIPT_NAME ...${RESET}"
-        _fetch "$GITHUB_URL/$SCRIPT_NAME" "$_tmp_dir/$SCRIPT_NAME" || {
-            echo -e "${RED}Download failed${RESET}"; exit 1
-        }
-        [[ ! -s "$_tmp_dir/$SCRIPT_NAME" ]] && { echo -e "${RED}Empty download${RESET}"; exit 1; }
-
-        # Verify SHA-256 checksum if available
-        local sha_url="$GITHUB_URL/$SCRIPT_NAME.sha256"
-        if _fetch "$sha_url" "$_tmp_dir/$SCRIPT_NAME.sha256" 2>/dev/null; then
-            local expected; expected=$(awk '{print $1}' "$_tmp_dir/$SCRIPT_NAME.sha256")
-            _verify_sha256 "$_tmp_dir/$SCRIPT_NAME" "$expected"
-        else
-            echo -e "${YELLOW}  ⚠ No checksum file available — skipping integrity check${RESET}"
-        fi
-
-        cp "$_tmp_dir/$SCRIPT_NAME" "./$SCRIPT_NAME"
-        echo -e "${GREEN}✅ Downloaded $SCRIPT_NAME${RESET}"
+        warn "No ENCRYPTOR_SHA256 given: integrity relies on HTTPS only. Archive SHA-256: ${actual}"
     fi
+    mkdir -p "$WORK/src"
+    tar -xzf "$WORK/src.tar.gz" -C "$WORK/src" --strip-components=1 || die "could not unpack the archive"
+    SRC="$WORK/src"
+    [[ -f "$SRC/encryptor.sh" && -f "$SRC/lib/core.sh" ]] || die "the archive does not contain Encryptor"
+    ok "Downloaded ${REF}"
+fi
 
-    # Download lib/ modules
-    mkdir -p lib
-    for mod in "${LIB_MODULES[@]}"; do
-        if [[ -f "lib/$mod" ]]; then
-            echo -e "${GREEN}✅ Found local lib/$mod${RESET}"
-            continue
-        fi
-        echo -e "${BLUE}Downloading lib/$mod ...${RESET}"
-        _fetch "$GITHUB_URL/lib/$mod" "$_tmp_dir/$mod" || {
-            echo -e "${RED}Failed to download lib/$mod${RESET}"; exit 1
-        }
-        [[ ! -s "$_tmp_dir/$mod" ]] && { echo -e "${RED}Empty download: lib/$mod${RESET}"; exit 1; }
+for m in "${MODULES[@]}"; do
+    [[ -f "$SRC/lib/$m.sh" ]] || die "missing module in source: lib/$m.sh"
+    bash -n "$SRC/lib/$m.sh" || die "syntax check failed: lib/$m.sh"
+done
+bash -n "$SRC/encryptor.sh" || die "syntax check failed: encryptor.sh"
 
-        local sha_url="$GITHUB_URL/lib/$mod.sha256"
-        if _fetch "$sha_url" "$_tmp_dir/$mod.sha256" 2>/dev/null; then
-            local expected; expected=$(awk '{print $1}' "$_tmp_dir/$mod.sha256")
-            _verify_sha256 "$_tmp_dir/$mod" "$expected"
-        fi
+# --- Install ------------------------------------------------------------------
+BIN_DIR="$PREFIX/bin"
+LIB_DIR="$PREFIX/lib/encryptor"
+MAN_DIR="$PREFIX/share/man/man1"
+COMP_DIR="$PREFIX/share/bash-completion/completions"
 
-        cp "$_tmp_dir/$mod" "lib/$mod"
-        echo -e "${GREEN}✅ Downloaded lib/$mod${RESET}"
-    done
-    echo
-}
+mkdir -p "$BIN_DIR" "$LIB_DIR" 2>/dev/null || die "cannot write to $PREFIX (set PREFIX, or run as a user who can)"
+[[ -w "$BIN_DIR" && -w "$LIB_DIR" ]] || die "cannot write to $PREFIX (set PREFIX, or run as a user who can)"
 
-install_encryptor() {
-    install_dir=""
-    lib_dir=""
-    needs_path_config=false
+# Remove modules from previous versions that no longer exist.
+for old in "$LIB_DIR"/*.sh; do
+    [[ -f "$old" ]] || continue
+    keep=0
+    for m in "${MODULES[@]}"; do [[ "$(basename "$old")" == "$m.sh" ]] && keep=1; done
+    (( keep )) || rm -f -- "$old"
+done
+for m in "${MODULES[@]}"; do
+    install -m 644 "$SRC/lib/$m.sh" "$LIB_DIR/$m.sh"
+done
+install -m 755 "$SRC/encryptor.sh" "$BIN_DIR/encryptor"
+ok "Installed $BIN_DIR/encryptor and ${#MODULES[@]} modules in $LIB_DIR"
 
-    # Determine installation directory
-    if [[ $EUID -eq 0 ]]; then
-        install_dir="/usr/local/bin"
-        lib_dir="/usr/local/lib/encryptor"
-        echo -e "${GREEN}Installing system-wide in $install_dir${RESET}"
-    else
-        if [[ -w "/usr/local/bin" ]]; then
-            install_dir="/usr/local/bin"
-            lib_dir="/usr/local/lib/encryptor"
-            echo -e "${GREEN}Installing system-wide in $install_dir (writable)${RESET}"
-        else
-            install_dir="$HOME/.local/bin"
-            lib_dir="$HOME/.local/lib/encryptor"
-            needs_path_config=true
-            echo -e "${GREEN}Installing for current user in $install_dir${RESET}"
-            mkdir -p "$install_dir"
-        fi
-    fi
+if [[ -f "$SRC/man/encryptor.1" ]] && mkdir -p "$MAN_DIR" 2>/dev/null; then
+    install -m 644 "$SRC/man/encryptor.1" "$MAN_DIR/encryptor.1" && ok "Installed man page"
+fi
+if mkdir -p "$COMP_DIR" 2>/dev/null && "$BIN_DIR/encryptor" completion bash > "$COMP_DIR/encryptor" 2>/dev/null; then
+    chmod 644 "$COMP_DIR/encryptor"; ok "Installed bash completion"
+fi
 
-    # Install lib/ modules first
-    mkdir -p "$lib_dir"
-    for mod in "${LIB_MODULES[@]}"; do
-        if [[ -f "lib/$mod" ]]; then
-            install -m 644 "lib/$mod" "$lib_dir/$mod"
-            echo -e "${GREEN}  ✓ Installed lib/$mod → $lib_dir/$mod${RESET}"
-        else
-            echo -e "${YELLOW}  ⚠ lib/$mod not found — skipping${RESET}"
-        fi
-    done
+# --- Verify -------------------------------------------------------------------
+say
+if "$BIN_DIR/encryptor" selftest; then :; else
+    die "the self-test failed on this system; Encryptor was installed but must not be used until this is resolved"
+fi
 
-    # Install main script and patch LIB_DIR to the installed lib path
-    local tmp_script
-    tmp_script=$(mktemp)
-    sed "s|LIB_DIR=\"\$SCRIPT_DIR/lib\"|LIB_DIR=\"${lib_dir}\"|" "$SCRIPT_NAME" > "$tmp_script"
-
-    if install -m 755 "$tmp_script" "$install_dir/$BINARY_NAME"; then
-        rm -f "$tmp_script"
-        echo -e "${GREEN}✅ Installed encryptor → $install_dir/$BINARY_NAME${RESET}"
-    else
-        rm -f "$tmp_script"
-        echo -e "${RED}Installation failed${RESET}"
-        echo -e "${YELLOW}Try re-running with 'sudo' or check permissions on $install_dir${RESET}"
-        exit 1
-    fi
-
-    # Configure PATH if needed
-    if [[ "$needs_path_config" == true ]]; then
-        configure_path "$install_dir"
-    fi
-}
-
-configure_path() {
-    local install_dir="$1"
-    
-    echo -e "${BLUE}Configuring PATH...${RESET}"
-    
-    # Check if PATH already configured
-    if [[ ":$PATH:" == *":$install_dir:"* ]]; then
-        echo -e "${GREEN}✅ PATH already configured correctly${RESET}"
-        return 0
-    fi
-    
-    # Create config file if it doesn't exist
-    if [[ ! -f "$config_file" ]]; then
-        echo -e "${YELLOW}Creating config file: $config_file${RESET}"
-        # Create directory for fish config if needed
-        if [[ "$user_shell" == "fish" ]]; then
-            mkdir -p "$(dirname "$config_file")"
-        fi
-        touch "$config_file"
-    fi
-    
-    # Check if PATH export already exists
-    local path_exists=false
-    case "$user_shell" in
-        "fish")
-            if grep -q "set -gx PATH.*\.local/bin" "$config_file" 2>/dev/null; then
-                path_exists=true
-            fi
-            ;;
-        *)
-            if grep -q 'export PATH.*\.local/bin' "$config_file" 2>/dev/null; then
-                path_exists=true
-            fi
-            ;;
-    esac
-    
-    # Add PATH configuration if not exists
-    if [[ "$path_exists" == false ]]; then
-        echo "" >> "$config_file"
-        echo "# Added by Encryptor installer" >> "$config_file"
-        
-        case "$user_shell" in
-            "fish")
-                echo "set -gx PATH \$HOME/.local/bin \$PATH" >> "$config_file"
-                ;;
-            *)
-                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$config_file"
-                ;;
-        esac
-        
-        echo -e "${GREEN}✅ PATH configured in $config_file${RESET}"
-    else
-        echo -e "${YELLOW}PATH configuration already exists in $config_file${RESET}"
-    fi
-    
-    # Update current session PATH
-    export PATH="$install_dir:$PATH"
-    echo -e "${GREEN}✅ PATH updated for current session${RESET}"
-}
-
-print_success() {
-    echo
-    echo -e "${GREEN}${BOLD}Installation Complete!${RESET}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    echo
-    
-    if command -v "$BINARY_NAME" >/dev/null 2>&1; then
-        echo -e "${GREEN}✅ Encryptor is ready to use!${RESET}"
-        echo -e "${BOLD}  encryptor${RESET}          # Launch interactive menu"
-        echo -e "${BOLD}  encryptor --help${RESET}   # Show help information"
-    else
-        echo -e "${YELLOW}Manual step required:${RESET}"
-        echo -e "${BOLD}Restart your terminal${RESET} or run:"
-        
-        case "$user_shell" in
-            "fish")
-                echo -e "${BOLD}  exec fish${RESET}"
-                ;;
-            *)
-                echo -e "${BOLD}  source $config_file${RESET}"
-                ;;
-        esac
-        
-        echo
-        echo -e "${BLUE}Or use the full path:${RESET}"
-        echo -e "${BOLD}  ~/.local/bin/encryptor${RESET}"
-    fi
-    
-    echo
-    echo -e "${GREEN}Thank you for installing Encryptor!${RESET}"
-    echo
-}
-
-# Main installation flow
-main() {
-    print_header
-    check_requirements
-    detect_shell
-    
-    downloaded=false
-    if [[ ! -f "$SCRIPT_NAME" ]]; then
-        download_script
-        downloaded=true
-    else
-        echo -e "${GREEN}Using local $SCRIPT_NAME for installation...${RESET}"
-    fi
-    
-    install_encryptor
-    
-    if [[ "$downloaded" == true ]]; then
-        rm -f "$SCRIPT_NAME"
-        echo -e "${BLUE}Cleaned up temporary files${RESET}"
-    fi
-    
-    print_success
-}
-
-# Handle script arguments
-case "${1:-}" in
-    --help|-h)
-        echo "Encryptor Installation Script"
-        echo "Usage: $0 [options]"
-        echo
-        echo "Options:"
-        echo "  --help, -h     Show this help message"
-        echo "  --version, -v  Show version information"
-        exit 0
-        ;;
-    --version|-v)
-        echo "Encryptor Installer v$VERSION"
-        exit 0
-        ;;
+say
+say "${G}${B}Encryptor $("$BIN_DIR/encryptor" version | awk '{print $2}') is installed.${N}"
+case ":${PATH}:" in
+    *":${BIN_DIR}:"*) say "Run: ${B}encryptor${N}" ;;
     *)
-        main "$@"
-        ;;
+        say "${Y}${BIN_DIR} is not in your PATH.${N} Add this line to your shell profile:"
+        say "  ${B}export PATH=\"${BIN_DIR}:\$PATH\"${N}"
+        say "or run it directly: ${B}${BIN_DIR}/encryptor${N}" ;;
 esac

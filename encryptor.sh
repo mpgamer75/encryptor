@@ -20,8 +20,8 @@ set -uo pipefail
 
 readonly ENCRYPTOR_VERSION="3.0.0"
 
-if [[ -z "${BASH_VERSINFO:-}" ]] || (( BASH_VERSINFO[0] < 4 )); then
-    printf 'encryptor: Bash 4.0 or newer is required (found %s).\n' "${BASH_VERSION:-unknown}" >&2
+if [[ -z "${BASH_VERSINFO:-}" ]] || (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4 ) )); then
+    printf 'encryptor: Bash 4.4 or newer is required (found %s).\n' "${BASH_VERSION:-unknown}" >&2
     printf 'On macOS: brew install bash\n' >&2
     exit 1
 fi

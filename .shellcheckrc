@@ -1,0 +1,5 @@
+# The program is split into modules that share globals (lib/*.sh are sourced
+# by encryptor.sh), so per-file "unused variable" analysis is not meaningful.
+# CI additionally lints the concatenated program, where SC2034 is enforced.
+disable=SC2034
+external-sources=true

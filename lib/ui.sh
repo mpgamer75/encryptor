@@ -15,12 +15,12 @@ UI_ALT_SCREEN=0; UI_CURSOR_HIDDEN=0
 _UI_SPINNER_PID=""
 
 # Colors / attributes (empty strings when colors are off).
-RESET=""; BOLD=""; DIM=""; UNDERLINE=""; REVERSE=""
+RESET=""; BOLD=""
 C_ACCENT=""; C_OK=""; C_WARN=""; C_ERR=""; C_INFO=""; C_MUTED=""; C_TITLE=""; C_KEY=""
 declare -a C_GRADIENT=()
 
 # Glyphs.
-G_OK="+"; G_ERR="x"; G_WARN="!"; G_INFO="i"; G_SEL=">"; G_BULLET="*"; G_ARROW="->"
+G_OK="+"; G_ERR="x"; G_WARN="!"; G_INFO="i"; G_SEL=">"; G_ARROW="->"
 G_H="-"; G_V="|"; G_TL="+"; G_TR="+"; G_BL="+"; G_BR="+"; G_DOT="."; G_UP="^"; G_DOWN="v"
 G_BAR_FULL="#"; G_BAR_EMPTY="-"; G_ELLIPSIS="..."; G_CHECK_ON="[x]"; G_CHECK_OFF="[ ]"
 declare -a G_SPIN=('|' '/' '-' '\')
@@ -39,7 +39,7 @@ ui_init() {
     if [[ "${loc,,}" == *utf-8* || "${loc,,}" == *utf8* ]] && [[ -z "${ENCRYPTOR_ASCII:-}" ]]; then UI_UNICODE=1; fi
 
     if (( UI_COLOR )); then
-        RESET=$'\e[0m'; BOLD=$'\e[1m'; DIM=$'\e[2m'; UNDERLINE=$'\e[4m'; REVERSE=$'\e[7m'
+        RESET=$'\e[0m'; BOLD=$'\e[1m'
         if [[ "${TERM:-}" == *256color* || -n "${COLORTERM:-}" ]]; then
             C_ACCENT=$'\e[38;5;44m'; C_OK=$'\e[38;5;78m'; C_WARN=$'\e[38;5;214m'; C_ERR=$'\e[38;5;203m'
             C_INFO=$'\e[38;5;75m'; C_MUTED=$'\e[38;5;245m'; C_TITLE=$'\e[38;5;231m'; C_KEY=$'\e[38;5;221m'
@@ -50,13 +50,13 @@ ui_init() {
             C_GRADIENT=($'\e[32m' $'\e[32m' $'\e[36m' $'\e[36m' $'\e[34m' $'\e[34m')
         fi
     else
-        RESET=""; BOLD=""; DIM=""; UNDERLINE=""; REVERSE=""
+        RESET=""; BOLD=""
         C_ACCENT=""; C_OK=""; C_WARN=""; C_ERR=""; C_INFO=""; C_MUTED=""; C_TITLE=""; C_KEY=""
         C_GRADIENT=("" "" "" "" "" "")
     fi
 
     if (( UI_UNICODE )); then
-        G_OK="✓"; G_ERR="✗"; G_WARN="▲"; G_INFO="●"; G_SEL="❯"; G_BULLET="•"; G_ARROW="→"
+        G_OK="✓"; G_ERR="✗"; G_WARN="▲"; G_INFO="●"; G_SEL="❯"; G_ARROW="→"
         G_H="─"; G_V="│"; G_TL="╭"; G_TR="╮"; G_BL="╰"; G_BR="╯"; G_DOT="·"; G_UP="↑"; G_DOWN="↓"
         G_BAR_FULL="█"; G_BAR_EMPTY="░"; G_ELLIPSIS="…"; G_CHECK_ON="◉"; G_CHECK_OFF="○"
         G_SPIN=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
@@ -265,8 +265,11 @@ ui_prompt_path() {
     fi
     ans=$(trim "$ans")
     # Expand a leading ~ (no other expansion is performed on user input).
-    [[ "$ans" == "~" ]] && ans="$HOME"
-    [[ "$ans" == "~/"* ]] && ans="$HOME/${ans:2}"
+    # shellcheck disable=SC2088  # deliberate: matching a literal leading tilde
+    case "$ans" in
+        "~")    ans="$HOME" ;;
+        "~/"*)  ans="$HOME/${ans:2}" ;;
+    esac
     UI_REPLY="$ans"
 }
 

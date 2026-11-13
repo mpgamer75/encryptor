@@ -1,114 +1,63 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# Builds encryptor_<version>-1_all.deb without debhelper.
+#
+# Layout (Debian policy: packages never install into /usr/local):
+#   /usr/bin/encryptor
+#   /usr/lib/encryptor/*.sh
+#   /usr/share/man/man1/encryptor.1.gz
+#   /usr/share/bash-completion/completions/encryptor
+#   /usr/share/doc/encryptor/
+# ==============================================================================
+set -euo pipefail
 
-# Debian Package Builder for Encryptor v2.1.0
-set -eo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+VERSION="$(sed -n 's/^readonly ENCRYPTOR_VERSION="\(.*\)"$/\1/p' encryptor.sh)"
+[[ -n "$VERSION" ]] || { echo "cannot read the version from encryptor.sh" >&2; exit 1; }
+PACKAGE="encryptor_${VERSION}-1_all.deb"
+STAGE="debian/tmp"
+MODULES=(core ui crypto certs audit tui cli)
 
-VERSION="2.1.0"
-PACKAGE_NAME="encryptor_${VERSION}-1_all.deb"
+echo "Building $PACKAGE"
+rm -rf -- "$STAGE"
+rm -f -- encryptor_*.deb
+mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/lib/encryptor" \
+         "$STAGE/usr/share/man/man1" "$STAGE/usr/share/doc/encryptor" \
+         "$STAGE/usr/share/bash-completion/completions"
 
-echo "════════════════════════════════════════════════════════════════"
-echo "  Building Debian package: $PACKAGE_NAME"
-echo "════════════════════════════════════════════════════════════════"
-echo
-
-# Clean previous builds
-rm -rf debian/tmp encryptor_*.deb 2>/dev/null || true
-
-# Create package structure
-echo "[1/8] Creating package directory structure..."
-mkdir -p debian/tmp/usr/local/bin
-mkdir -p debian/tmp/usr/local/lib/encryptor
-mkdir -p debian/tmp/usr/share/doc/encryptor
-mkdir -p debian/tmp/usr/share/man/man1
-mkdir -p debian/tmp/DEBIAN
-
-# Copy main script and patch LIB_DIR to installed path
-echo "[2/8] Installing encryptor binary..."
-sed 's|LIB_DIR="$SCRIPT_DIR/lib"|LIB_DIR="/usr/local/lib/encryptor"|' \
-    encryptor.sh > debian/tmp/usr/local/bin/encryptor
-chmod 755 debian/tmp/usr/local/bin/encryptor
-echo "       ✓ Installed encryptor → /usr/local/bin/encryptor (LIB_DIR patched)"
-
-# Copy lib/ modules
-echo "[2b/8] Installing library modules..."
-for mod in lib/ui.sh lib/crypto.sh lib/certs.sh lib/audit.sh; do
-    if [[ -f "$mod" ]]; then
-        cp "$mod" debian/tmp/usr/local/lib/encryptor/
-        chmod 644 "debian/tmp/usr/local/lib/encryptor/$(basename "$mod")"
-        echo "       ✓ Copied $mod → /usr/local/lib/encryptor/"
-    else
-        echo "       ⚠ WARNING: $mod not found — package may be incomplete"
-    fi
+install -m 755 encryptor.sh "$STAGE/usr/bin/encryptor"
+for m in "${MODULES[@]}"; do
+    [[ -f "lib/$m.sh" ]] || { echo "missing lib/$m.sh" >&2; exit 1; }
+    install -m 644 "lib/$m.sh" "$STAGE/usr/lib/encryptor/$m.sh"
 done
 
-# Copy documentation
-echo "[3/8] Installing documentation..."
-cp README.md LICENSE CHANGELOG.md debian/tmp/usr/share/doc/encryptor/
-echo "       ✓ Copied README.md, LICENSE, CHANGELOG.md"
+gzip -9 -n -c man/encryptor.1 > "$STAGE/usr/share/man/man1/encryptor.1.gz"
+chmod 644 "$STAGE/usr/share/man/man1/encryptor.1.gz"
+bash encryptor.sh completion bash > "$STAGE/usr/share/bash-completion/completions/encryptor"
+chmod 644 "$STAGE/usr/share/bash-completion/completions/encryptor"
 
-# Copy additional docs if they exist
-if [[ -d docs ]]; then
-    cp docs/*.md debian/tmp/usr/share/doc/encryptor/ 2>/dev/null || true
-    echo "       ✓ Copied docs/*.md"
+install -m 644 README.md SECURITY.md docs/*.md "$STAGE/usr/share/doc/encryptor/"
+install -m 644 debian/copyright "$STAGE/usr/share/doc/encryptor/copyright"
+gzip -9 -n -c CHANGELOG.md > "$STAGE/usr/share/doc/encryptor/changelog.gz"
+chmod 644 "$STAGE/usr/share/doc/encryptor/changelog.gz"
+
+sed "s/^Version: .*/Version: ${VERSION}-1/" debian/control > "$STAGE/DEBIAN/control"
+printf 'Installed-Size: %s\n' "$(du -sk "$STAGE/usr" | cut -f1)" >> "$STAGE/DEBIAN/control"
+install -m 755 debian/postinst debian/prerm "$STAGE/DEBIAN/"
+
+# The staged program must work from its packaged layout before we ship it.
+"$STAGE/usr/bin/encryptor" selftest >/dev/null || { echo "self-test of the staged package failed" >&2; exit 1; }
+
+if command -v fakeroot >/dev/null 2>&1; then
+    fakeroot dpkg-deb --build "$STAGE" "$PACKAGE" >/dev/null
 else
-    echo "       ⚠ docs/ directory not found (optional)"
+    dpkg-deb --root-owner-group --build "$STAGE" "$PACKAGE" >/dev/null
 fi
-
-# Copy and compress man page
-echo "[4/8] Installing man page..."
-cp debian/encryptor.1 debian/tmp/usr/share/man/man1/
-gzip -9 -f debian/tmp/usr/share/man/man1/encryptor.1
-echo "       ✓ Compressed and installed man page"
-
-# Copy control file
-echo "[5/8] Creating DEBIAN control files..."
-cp debian/control debian/tmp/DEBIAN/
-cp debian/copyright debian/tmp/usr/share/doc/encryptor/
-
-# Calculate and add installed size
-INSTALLED_SIZE=$(du -sk debian/tmp | cut -f1)
-echo "Installed-Size: $INSTALLED_SIZE" >> debian/tmp/DEBIAN/control
-echo "       ✓ Calculated installed size: ${INSTALLED_SIZE}KB"
-
-# Copy maintainer scripts
-cp debian/postinst debian/tmp/DEBIAN/
-cp debian/prerm debian/tmp/DEBIAN/
-chmod 755 debian/tmp/DEBIAN/postinst debian/tmp/DEBIAN/prerm
-echo "       ✓ Installed maintainer scripts"
-
-# Build package
-echo "[6/8] Building .deb package..."
-fakeroot dpkg-deb --build debian/tmp "$PACKAGE_NAME" >/dev/null 2>&1
-echo "       ✓ Package built successfully"
+rm -rf -- "$STAGE"
 
 echo
-echo "════════════════════════════════════════════════════════════════"
-echo "  Package built: $PACKAGE_NAME"
-echo "════════════════════════════════════════════════════════════════"
+dpkg-deb --info "$PACKAGE" | sed -n '/Package:/,$p' | sed 's/^/  /' | head -12
 echo
-
-# Test package
-echo "[7/8] Package Information:"
-echo "────────────────────────────────────────────────────────────────"
-dpkg-deb --info "$PACKAGE_NAME" | grep -E "Package:|Version:|Architecture:|Maintainer:|Description:" | sed 's/^/  /'
-echo
-
-echo "[8/8] Package Contents:"
-echo "────────────────────────────────────────────────────────────────"
-dpkg-deb --contents "$PACKAGE_NAME" | grep -E "(bin/encryptor|man|doc)" | awk '{print "  " $6}' | head -10
-echo "  ... (use 'dpkg-deb --contents $PACKAGE_NAME' for full list)"
-
-echo
-echo "════════════════════════════════════════════════════════════════"
-echo "  Build completed successfully!"
-echo "════════════════════════════════════════════════════════════════"
-echo
-echo "Installation:"
-echo "  sudo dpkg -i $PACKAGE_NAME"
-echo
-echo "Removal:"
-echo "  sudo dpkg -r encryptor"
-echo
-echo "Testing:"
-echo "  lintian $PACKAGE_NAME  # Check package quality (if lintian installed)"
-echo
+echo "Built $PACKAGE"
+echo "Install:  sudo apt install ./$PACKAGE"
+echo "Remove:   sudo apt remove encryptor"

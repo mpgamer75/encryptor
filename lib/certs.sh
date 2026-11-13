@@ -8,7 +8,6 @@
 # All objects live in $CERT_DIR:  NAME.key  NAME.pem  NAME.csr  NAME.p12
 # ==============================================================================
 
-readonly -a PKI_KEY_TYPES=(ec256 ec384 rsa3072 rsa4096)
 declare -A PKI_KEY_LABEL=(
     [ec256]="ECDSA P-256"  [ec384]="ECDSA P-384"
     [rsa3072]="RSA 3072-bit" [rsa4096]="RSA 4096-bit"
@@ -487,7 +486,8 @@ cert_ui_menu() {
     local rc
     while true; do
         pki_store_summary
-        local sub="${PKI_COUNT_CERTS} certificate(s), ${PKI_COUNT_KEYS} private key(s) in $(ui_pathfit "$CERT_DIR")"
+        local sub
+        sub="${PKI_COUNT_CERTS} certificate(s), ${PKI_COUNT_KEYS} private key(s) in $(ui_pathfit "$CERT_DIR")"
         UI_SEL_HEADER="$(tui_header "Certificates & keys" "$sub")"
         ui_select "What would you like to do?" \
             "1|Quick identity|key + self-signed certificate, ready for file encryption" \
@@ -713,7 +713,7 @@ cert_ui_inspect() {
     lines+=("$(ui_row "Serial" "${PKI_INFO[serial]}")")
     ui_panel "Certificate" "${lines[@]}"
     echo
-    printf '  %sSHA-256%s  %s\n' "$C_MUTED" "$RESET" "${PKI_INFO[fingerprint]}"
+    printf '  %sSHA-256 fingerprint%s\n  %s\n' "$C_MUTED" "$RESET" "${PKI_INFO[fingerprint]}"
     echo
     local level msg
     while IFS='|' read -r level msg; do

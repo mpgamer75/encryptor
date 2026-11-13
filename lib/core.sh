@@ -9,6 +9,7 @@
 # ==============================================================================
 
 # --- Exit codes (stable, documented in `encryptor help` and the man page) ---
+# shellcheck disable=SC2034  # documented for completeness
 readonly EX_OK=0            # success
 readonly EX_FAIL=1          # generic failure
 readonly EX_USAGE=2         # bad command line

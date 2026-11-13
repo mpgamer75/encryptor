@@ -22,131 +22,132 @@ requests, documentation improvements, and code changes.
 
 ### Requirements
 
-- Bash 4.0+ (5.x recommended)
-- OpenSSL 3.x (1.1.1+ minimum)
-- ShellCheck (`sudo apt install shellcheck`)
-- BATS (optional, for unit tests): https://github.com/bats-core/bats-core
-- Git
+- Bash 4.4+ (5.x recommended), OpenSSL 1.1.1+ (3.x recommended), coreutils
+- [ShellCheck](https://www.shellcheck.net) for linting
+- Optional: `tmux` to drive the interactive UI in tests, `python3` for strict JSON checks
 
 ### Clone and run
 
 ```bash
 git clone https://github.com/mpgamer75/encryptor.git
 cd encryptor
-chmod +x encryptor.sh
-./encryptor.sh --help
-./encryptor.sh          # launch interactive mode
+./encryptor.sh            # interactive UI, straight from the checkout
+bash tests/run.sh         # full test suite
 ```
+
+Use `ENCRYPTOR_CONFIG_DIR=/tmp/enc-dev ./encryptor.sh` to keep experiments
+away from your real key store.
 
 ### Project structure
 
 ```
-encryptor/
-├── encryptor.sh          # Entry point — sources lib/ modules
-├── lib/
-│   ├── ui.sh             # Colors, headers, menus, spinner, file selector
-│   ├── crypto.sh         # Encryption/decryption logic, algorithm registry
-│   ├── certs.sh          # X.509 / PKI certificate management
-│   └── audit.sh          # Security audit (local + remote)
-├── docs/
-│   ├── ALGORITHMS.md     # Algorithm technical reference
-│   └── USAGE.md          # End-user usage guide
-├── tests/                # BATS unit tests (see Testing section)
-├── debian/               # Debian package files
-├── install.sh            # One-line installer
-├── uninstall.sh          # Uninstaller
-├── build_deb.sh          # .deb package builder
-├── Dockerfile            # Container image
-└── .github/workflows/    # CI/CD pipelines
+encryptor.sh        Entry point: locates lib/, loads modules, dispatches
+lib/core.sh         Exit codes, state dirs, temp files, traps, logging, utilities
+lib/crypto.sh       Encryption engine (ENCRYPTOR/3 + legacy readers). No UI.
+lib/certs.sh        PKI engine (pki_*) and its interactive screens (cert_ui_*)
+lib/audit.sh        Audit engine (audit_*), reports, TLS scan wrapper
+lib/ui.sh           Terminal UI toolkit (theme, menus, panels, prompts, spinner)
+lib/tui.sh          Interactive application (main menu, wizards)
+lib/cli.sh          Non-interactive commands
+tests/run.sh        Test suite (plain Bash)
+man/encryptor.1     Manual page
+docs/               USAGE, ALGORITHMS, FORMAT (specification), ROADMAP
+install.sh, uninstall.sh, build_deb.sh, encryptor.spec, Dockerfile, debian/
+.github/workflows/  CI (lint, tests, packaging) and release
 ```
+
+### Layering rules
+
+```
+cli.sh / tui.sh      →  talk to the user, never call openssl for crypto
+crypto.sh / pki_* / audit_*  →  do the work, never prompt or print
+core.sh              →  shared runtime, no dependencies
+```
+
+- **Engine functions** return an exit code from `lib/core.sh` and put a
+  human-readable reason in `$ENC_ERR`. They never read from the terminal and
+  never print. This is what lets the CLI and the UI share one implementation
+  and what makes the engine testable.
+- **Presentation functions** (`tui_*`, `cert_ui_*`, `audit_ui_*`, `cli_*`)
+  collect input, call the engine, and render the result.
+- A new feature normally means: one engine function, one CLI option or
+  command, one UI screen, tests, docs.
 
 ---
 
 ## Code Style
 
-### Bash conventions
+1. `#!/usr/bin/env bash`; the program runs under `set -uo pipefail` (no `-e`:
+   errors are handled explicitly).
+2. Declare variables `local`; separate declaration from command substitution
+   (`local v; v=$(cmd)`).
+3. Quote every expansion. Use `--` before file operands (`rm -f -- "$f"`).
+4. **Secrets never go into argv or onto disk.** Pass them to OpenSSL with
+   `-pass fd:3 3< <(printf '%s\n' "$secret")`. Never use `pass:`, never write
+   a password to a file, never `echo` one into a pipeline of external
+   commands (`printf` is a built-in; `echo` is too, but keep to `printf`).
+5. **Never interpolate user input into an option position.** Validate against
+   an allow-list or a strict regular expression first (see `crypto_is_cipher`,
+   `is_safe_name`, `audit_valid_target`).
+6. `core_tmpdir` must be called from the main shell, not inside `$(...)`
+   (a directory created in a subshell would escape the exit trap).
+7. UI output goes through the `ui_*` helpers so that `NO_COLOR`, ASCII
+   fallback and line-mode keep working. No raw escape codes elsewhere.
+8. Naming: `snake_case` functions, `_leading_underscore` for module-private
+   ones, `UPPER_CASE` globals, prefixes by module (`crypto_`, `pki_`,
+   `audit_`, `ui_`, `tui_`, `cli_`, `core_`).
+9. ShellCheck clean at `-S warning`, both per file and for the concatenated
+   program (CI runs both).
 
-1. **Shebang:** Use `#!/usr/bin/env bash` (not `#!/bin/bash`) for portability.
+### Adding a cipher
 
-2. **Safety flags:** All scripts must start with `set -uo pipefail`.
-   The interactive main script omits `-e` (exit-on-error) because `read`
-   returns non-zero when interrupted, but new library functions should be
-   written to handle errors explicitly.
+1. Add its OpenSSL name to `ENC_CIPHER_IDS` and entries to `ENC_CIPHER_LABEL`
+   / `ENC_CIPHER_DESC` in `lib/crypto.sh`. It must be a mode `openssl enc`
+   supports (no AEAD modes).
+2. Add it to the round-trip loop in `tests/run.sh` and to the completion list
+   in `lib/cli.sh`.
+3. Document it in `docs/ALGORITHMS.md`.
 
-3. **Local variables:** Always declare with `local`. Separate declaration from
-   assignment when the value comes from a command:
-   ```bash
-   # Wrong — masks return code on Bash 4:
-   local val=$(cmd)
+Nothing else changes: the container, the MAC and both front ends are generic.
 
-   # Correct:
-   local val
-   val=$(cmd)
-   ```
+### Changing the file format
 
-4. **Password handling:** Passwords MUST NEVER appear on the command line.
-   Use the `_write_pass_file()` helper from `lib/crypto.sh` and pass
-   `-pass file:$pass_file` to OpenSSL.
-
-5. **Quoting:** Always double-quote variable expansions: `"$var"`, `"${arr[@]}"`.
-
-6. **Command substitution:** Prefer `$(...)` over backticks.
-
-7. **ShellCheck clean:** All code must pass `shellcheck -S warning`.
-
-### Naming conventions
-
-- Functions: `snake_case`
-- Private functions (internal to a module): `_leading_underscore`
-- Constants / config: `UPPER_CASE`
-- Local variables: `lower_case`
-
-### Adding a new encryption algorithm
-
-1. Add an entry to the `ALGORITHMS` associative array in `lib/crypto.sh`
-2. Add a case branch in `process_encryption()` and `process_decryption()`
-3. Add a case in `_mode_label()` describing the mode
-4. Update `docs/ALGORITHMS.md` with technical details
-5. Add a round-trip test in `.github/workflows/test.yml`
-6. Update the `--help` text in `lib/ui.sh`
+The format is a compatibility contract. Anything that changes the bytes
+written must bump the version in the magic line, keep a reader for the old
+version, update `docs/FORMAT.md`, and keep the openssl-only recovery recipe
+working (it is executed by the test suite).
 
 ---
 
 ## Testing
 
-### Syntax check (mandatory, runs in CI)
-
 ```bash
-bash -n encryptor.sh
-for f in lib/*.sh; do bash -n "$f"; done
+bash tests/run.sh        # everything; -v also lists passing assertions
+shellcheck -S warning encryptor.sh install.sh uninstall.sh build_deb.sh lib/*.sh tests/run.sh
 ```
 
-### ShellCheck (mandatory, runs in CI)
+The suite covers round trips for every cipher, tamper detection (header,
+body, truncation, appended data, cipher swap), wrong credentials, CLI error
+handling and exit codes, JSON validity, stdin/stdout, recipients (RSA, EC,
+encrypted keys, non-recipients), legacy 2.0/2.1/S-MIME files, the HMAC and
+PBKDF2 implementations against OpenSSL and fixed vectors, the documented
+recovery recipe, absence of secrets in process arguments and temp files, the
+PKI engine, log and permission hygiene, and a line-mode run of the UI.
+
+Every bug fix should come with an assertion that fails without the fix.
+
+### Manual UI check
 
 ```bash
-shellcheck -S warning encryptor.sh lib/*.sh install.sh uninstall.sh build_deb.sh
+tmux new-session -d -s enc -x 100 -y 34 './encryptor.sh'
+tmux send-keys -t enc e          # drive it
+tmux capture-pane -t enc -p      # see the screen
 ```
 
-### Smoke tests (run in CI)
-
-The CI workflow (`test.yml`) runs functional smoke tests including:
-- AES-256-GCM round-trip encrypt/decrypt
-- AES-256-CBC round-trip
-- SHA-256 sidecar creation and verification
-- JSON output mode
-- Process argument security check (password not visible in `ps aux`)
-
-### Manual testing checklist
-
-Before submitting a PR, manually verify:
-
-- [ ] `./encryptor.sh --help` and `--version` work
-- [ ] Interactive menu loads without errors
-- [ ] Encrypt a file with AES-256-GCM, then decrypt it successfully
-- [ ] Encrypt a file with S/MIME (requires a certificate)
-- [ ] Certificate Manager: create CA → generate key+CSR → sign → inspect
-- [ ] Security Audit: local audit produces a score
-- [ ] Uninstall script runs without destroying unrelated files
+Before a release, walk through: encrypt/decrypt with a password, encrypt for
+two recipients and decrypt with a passphrase-protected key, create an
+identity / CA / CSR / signed certificate, dashboard, audit, `Ctrl-C` in the
+middle of an operation (terminal restored, no temp files left).
 
 ---
 
@@ -156,10 +157,11 @@ Because Encryptor handles cryptographic operations and private keys, security
 is a first-class concern in every contribution.
 
 **Mandatory for all PRs touching crypto code:**
-- Passwords must not appear in process arguments, environment variables, or logs
-- Temporary files containing secrets must use mode 600 and be deleted by the EXIT trap
-- New symmetric algorithms must be AEAD or explicitly documented as non-authenticated
-- PBKDF2 iterations must remain at or above 600,000
+- Secrets must not appear in process arguments, on disk, or in logs
+- Nothing may write unauthenticated plaintext: verify the tag before decrypting
+- Values read from a file header are untrusted until validated against an allow-list
+- The default PBKDF2 work factor must remain at or above 600,000
+- No new primitive without a known-answer test in `crypto_selftest` and `tests/run.sh`
 
 **Reporting security vulnerabilities:**
 See [SECURITY.md](./SECURITY.md) — do not open a public GitHub issue for

@@ -30,6 +30,10 @@ check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "
 # check_rc EXPECTED "description" command...
 check_rc() { local want="$1" d="$2" rc=0; shift 2; "$@" >/dev/null 2>&1 || rc=$?; if [[ $rc -eq $want ]]; then ok "$d"; else bad "$d" "exit $rc, expected $want"; fi; }
 enc() { bash "$ENC" "$@"; }
+# `timeout` is GNU coreutils; fall back to gtimeout (Homebrew) or no limit.
+if command -v timeout >/dev/null 2>&1; then TIMEOUT="timeout"; elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT="gtimeout"; else TIMEOUT=""; fi
+tmo() { local secs="$1"; shift; if [[ -n "$TIMEOUT" ]]; then "$TIMEOUT" "$secs" "$@"; else "$@"; fi; }
+export -f tmo; export TIMEOUT
 
 # Fast KDF for the bulk of the suite (the default work factor is tested once).
 FAST=(--iter 100000)
@@ -173,7 +177,7 @@ fi
 
 # ------------------------------------------------------------------------------
 section "Engine internals"
-unit() { ( set -uo pipefail; ENCRYPTOR_VERSION=test; source "$ROOT/lib/core.sh"; source "$ROOT/lib/ui.sh"; source "$ROOT/lib/crypto.sh"; source "$ROOT/lib/certs.sh"; source "$ROOT/lib/audit.sh"; ui_init plain; core_install_traps; "$@" ); }
+unit() { ( set -uo pipefail; ENCRYPTOR_VERSION="test"; source "$ROOT/lib/core.sh"; source "$ROOT/lib/ui.sh"; source "$ROOT/lib/crypto.sh"; source "$ROOT/lib/certs.sh"; source "$ROOT/lib/audit.sh"; ui_init plain; core_install_traps; "$@" ); }
 t_hmac() {
     local i key want got
     for i in 1 2 3 4 5; do
@@ -284,8 +288,8 @@ check "log lines cannot be forged through file names" bash -c "! grep -q '^injec
 section "Audit and interactive smoke test"
 check    "audit runs and reports a score"       bash -c "bash '$ENC' audit | grep -q 'Score'"
 check    "line-mode menu quits cleanly"         bash -c "printf 'q\n' | ENCRYPTOR_ALLOW_PIPED_UI=1 bash '$ENC' | grep -q 'Main menu'"
-check    "line-mode menu survives EOF (no infinite loop)" bash -c "ENCRYPTOR_ALLOW_PIPED_UI=1 timeout 10 bash '$ENC' </dev/null"
-check    "line-mode: encrypt wizard end to end" bash -c "cp plain.txt wiz.txt && printf '%s\n' e wiz.txt p wizard-password-123 wizard-password-123 n '' q | ENCRYPTOR_ALLOW_PIPED_UI=1 timeout 60 bash '$ENC' >/dev/null 2>&1; printf 'wizard-password-123\n' > wp && chmod 600 wp && bash '$ENC' decrypt -q -p wp -o wiz.out wiz.txt.enc && cmp -s plain.txt wiz.out"
+check    "line-mode menu survives EOF (no infinite loop)" bash -c "ENCRYPTOR_ALLOW_PIPED_UI=1 tmo 10 bash '$ENC' </dev/null"
+check    "line-mode: encrypt wizard end to end" bash -c "cp plain.txt wiz.txt && printf '%s\n' e wiz.txt p wizard-password-123 wizard-password-123 n '' q | ENCRYPTOR_ALLOW_PIPED_UI=1 tmo 60 bash '$ENC' >/dev/null 2>&1; printf 'wizard-password-123\n' > wp && chmod 600 wp && bash '$ENC' decrypt -q -p wp -o wiz.out wiz.txt.enc && cmp -s plain.txt wiz.out"
 check    "completion script is valid bash"      bash -c "bash '$ENC' completion bash | bash -n"
 
 # ------------------------------------------------------------------------------
