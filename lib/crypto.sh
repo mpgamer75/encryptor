@@ -670,6 +670,15 @@ crypto_encrypt() {
     return 0
 }
 
+# Copy stdin to stdout, discarding exactly the first N bytes. Works on pipes
+# and FIFOs with every coreutils implementation: `tail -c +N` hangs on a FIFO
+# with uutils coreutils (Ubuntu 25.10+), and `head -c` may read ahead. One-byte
+# reads cannot overshoot; headers are small, so this costs nothing measurable.
+_crypto_skip() {
+    dd bs=1 count="$1" of=/dev/null 2>/dev/null
+    cat
+}
+
 # --- Decryption / verification ---------------------------------------------
 # crypto_decrypt IN OUT [verify-only]
 #   v3 containers: authenticate first, then decrypt.
@@ -783,7 +792,7 @@ crypto_decrypt() {
         if [[ -n "$verify_only" ]]; then enc_key=""; return 0; fi
 
         _crypto_phase decrypt "" 0
-        head -c "$auth_len" -- "$in" | tail -c "+$(( hdr_len + 1 ))" \
+        head -c "$auth_len" -- "$in" | _crypto_skip "$hdr_len" \
             | openssl enc -d "-$cipher" -pbkdf2 -iter "$ENC_BODY_ITER" -md sha256 \
                 -pass fd:3 3< <(printf '%s\n' "$enc_key") 2>"$errf"
         st=("${PIPESTATUS[@]}"); rc=${st[2]}
@@ -812,7 +821,7 @@ crypto_decrypt() {
     fi
     _crypto_phase decrypt "$part" "${ENC_META[body_len]}"
     (
-        tail -c "+$(( hdr_len + 1 ))" < "$fifo" \
+        _crypto_skip "$hdr_len" < "$fifo" \
             | openssl enc -d "-$cipher" -pbkdf2 -iter "$ENC_BODY_ITER" -md sha256 \
                 -pass fd:3 3< <(printf '%s\n' "$enc_key") > "$part" 2>"$errf"
         exit "${PIPESTATUS[1]}"

@@ -101,12 +101,15 @@ core.sh              →  shared runtime, no dependencies
    intermittently when the reader exits before the writer finishes. Capture
    the output in a variable and test that, or use a reader that consumes all
    input (`sed -n '1p'`, `grep … >/dev/null`).
-10. Numbers from users or files are validated with a regular expression and
+10. **Portable tools only.** The suite runs on GNU, busybox/musl, BSD (macOS)
+    and uutils userlands. Avoid behaviour that differs between them — for
+    example `tail -c +N` on a FIFO hangs with uutils; use `_crypto_skip`.
+11. Numbers from users or files are validated with a regular expression and
     then read in base 10 (`$(( 10#$n ))`): a leading zero must not mean octal.
-11. Naming: `snake_case` functions, `_leading_underscore` for module-private
+12. Naming: `snake_case` functions, `_leading_underscore` for module-private
    ones, `UPPER_CASE` globals, prefixes by module (`crypto_`, `pki_`,
    `audit_`, `ui_`, `tui_`, `cli_`, `core_`).
-12. ShellCheck clean at `-S warning`, both per file and for the concatenated
+13. ShellCheck clean at `-S warning`, both per file and for the concatenated
     program (CI runs both).
 
 ### Adding a cipher

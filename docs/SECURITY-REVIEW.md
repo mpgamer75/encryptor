@@ -88,6 +88,7 @@ Found by the author while verifying the reviews:
 - Checks of the form `openssl … | grep -q` can fail intermittently under `pipefail` when the reader exits before the writer has finished. Removed throughout.
 - The built-in self-test's tamper check overwrote a byte with a fixed value and so failed spuriously 1 time in 256. Made deterministic.
 - On OpenSSL 1.1.1 a scrypt envelope could be created but not opened with the command form first used. Fixed and now covered by a required CI job on that version.
+- With uutils coreutils (the Rust implementation shipped by Ubuntu 25.10 and later) `tail -c +N` can hang when reading a named pipe, which froze the new single-pass decryption. Replaced by a byte-exact skip that behaves the same everywhere; that userland is now part of the CI test matrix.
 
 ## Accepted or deferred
 
@@ -118,9 +119,9 @@ Found by the author while verifying the reviews:
 ## Platforms the fixes were verified on
 
 `tests/run.sh` (169 assertions) passes on OpenSSL 1.1.1 (Alpine 3.14, Ubuntu
-20.04), 3.0 (Ubuntu 22.04/24.04), 3.5 (Alpine 3.24, musl), 4.0 (Fedora, during
-the RPM build) and on macOS with Homebrew Bash and OpenSSL. The reviewers
-themselves tested on OpenSSL 3.0 only.
+20.04), 3.0 (Ubuntu 22.04/24.04), 3.5 (Alpine 3.24 with musl; Ubuntu 25.10
+with uutils coreutils), 4.0 (Fedora, during the RPM build) and on macOS with
+Homebrew Bash and OpenSSL. The reviewers themselves tested on OpenSSL 3.0 only.
 
 ## Limits
 

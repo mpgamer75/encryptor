@@ -39,11 +39,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        # ubuntu-latest matters separately: recent Ubuntu ships uutils (Rust)
+        # coreutils, whose tools differ from GNU's in corner cases.
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Versions
-        run: bash --version | head -n 1 && openssl version
+        run: bash --version | head -n 1 && openssl version && (tail --version | head -n 1)
       - name: Run test suite
         run: bash tests/run.sh
 
