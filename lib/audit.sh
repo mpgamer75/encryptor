@@ -1,365 +1,357 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# lib/audit.sh — Security Audit (local checks + remote SSL/TLS scan)
+# lib/audit.sh — Security audit: engine (audit_run), text / JSON reports,
+#                interactive menu, and the optional remote TLS scan (testssl.sh).
 # ==============================================================================
 
-security_audit_menu() {
+readonly TESTSSL_REPO="https://github.com/testssl/testssl.sh.git"
+readonly TESTSSL_TAG="v3.2.5"        # pinned release — never an unpinned branch
+# The commit that tag pointed to when it was reviewed. Tags can be moved; the
+# download is refused unless it is exactly this commit.
+readonly TESTSSL_COMMIT="4f17be931a9d60f3f987975aea8221f1a8eaf7aa"
+
+declare -a AUDIT_ID=() AUDIT_STATUS=() AUDIT_TITLE=() AUDIT_DETAIL=() AUDIT_FIX=()
+AUDIT_SCORE=0; AUDIT_MAX=0; AUDIT_FAILS=0; AUDIT_WARNS=0
+
+_audit_add() {
+    AUDIT_ID+=("$1"); AUDIT_STATUS+=("$2"); AUDIT_TITLE+=("$3"); AUDIT_DETAIL+=("${4:-}"); AUDIT_FIX+=("${5:-}")
+    case "$2" in
+        pass) AUDIT_SCORE=$(( AUDIT_SCORE + 2 )); AUDIT_MAX=$(( AUDIT_MAX + 2 )) ;;
+        warn) AUDIT_SCORE=$(( AUDIT_SCORE + 1 )); AUDIT_MAX=$(( AUDIT_MAX + 2 )); (( AUDIT_WARNS++ )) ;;
+        fail) AUDIT_MAX=$(( AUDIT_MAX + 2 )); (( AUDIT_FAILS++ )) ;;
+    esac
+    return 0
+}
+
+# audit_run [DIR] — DIR is scanned (non-recursively) for legacy encrypted files.
+audit_run() {
+    local scan_dir="${1:-.}"
+    AUDIT_ID=(); AUDIT_STATUS=(); AUDIT_TITLE=(); AUDIT_DETAIL=(); AUDIT_FIX=()
+    AUDIT_SCORE=0; AUDIT_MAX=0; AUDIT_FAILS=0; AUDIT_WARNS=0
+    core_init_state
+    core_probe_openssl
+
+    # 1. Crypto library
+    case "$OPENSSL_FLAVOR" in
+        openssl)
+            if   (( OPENSSL_MAJOR >= 3 )); then _audit_add openssl pass "OpenSSL version" "$OPENSSL_VERSION_TEXT — supported release line. Keep it patched through your OS updates."
+            elif [[ "$OPENSSL_VERSION_TEXT" == *" 1.1.1"* ]]; then _audit_add openssl warn "OpenSSL version" "$OPENSSL_VERSION_TEXT — the 1.1.1 line reached end of life in September 2023." "Upgrade to OpenSSL 3.x"
+            else _audit_add openssl fail "OpenSSL version" "$OPENSSL_VERSION_TEXT — too old (PBKDF2 support requires 1.1.1+)." "Upgrade to OpenSSL 3.x"; fi ;;
+        libressl) _audit_add openssl info "Crypto library" "$OPENSSL_VERSION_TEXT — not assessed by this audit; keep it current. scrypt-sealed files need OpenSSL." ;;
+        *)        _audit_add openssl warn "Crypto library" "Unrecognised: ${OPENSSL_VERSION_TEXT:-unknown}" ;;
+    esac
+
+    # 2. Shell
+    if (( BASH_VERSINFO[0] >= 5 )); then _audit_add bash pass "Bash version" "$BASH_VERSION"
+    else _audit_add bash warn "Bash version" "$BASH_VERSION — supported, but 5.x is recommended." "Upgrade bash"; fi
+
+    # 3. Engine self-test (known-answer tests + round trip + tamper detection)
+    if crypto_selftest; then
+        _audit_add selftest pass "Cryptographic self-test" "HMAC-SHA256, PBKDF2 and scrypt known-answer tests, round trips and tamper detection all passed."
+    else
+        _audit_add selftest fail "Cryptographic self-test" "$ENC_ERR" "Do not use this installation until this is resolved"
+    fi
+
+    # 4. Cipher availability
+    local c missing=""
+    for c in "${ENC_CIPHER_IDS[@]}"; do crypto_cipher_available "$c" || missing+="$c "; done
+    if [[ -z "$missing" ]]; then _audit_add ciphers pass "Cipher support" "All ${#ENC_CIPHER_IDS[@]} ciphers are available."
+    elif crypto_cipher_available "$ENC_DEFAULT_CIPHER"; then _audit_add ciphers info "Cipher support" "Not provided by this OpenSSL build: ${missing% }"
+    else _audit_add ciphers fail "Cipher support" "The default cipher $ENC_DEFAULT_CIPHER is not available."; fi
+
+    # 5. KDF work factor
+    if [[ "$(crypto_resolve_kdf "$ENC_DEFAULT_KDF")" == "scrypt" ]]; then
+        _audit_add kdf pass "Password KDF" "scrypt, N=${ENC_SCRYPT_N} r=${ENC_SCRYPT_R} p=${ENC_SCRYPT_P} — memory-hard (an OWASP-listed configuration)."
+    elif (( ENC_DEFAULT_ITER < 600000 )); then
+        _audit_add kdf warn "Password KDF" "PBKDF2 iterations lowered to ${ENC_DEFAULT_ITER} via ENCRYPTOR_PBKDF2_ITER." "Unset ENCRYPTOR_PBKDF2_ITER or use >= 600000"
+    elif [[ "$ENC_DEFAULT_KDF" == "pbkdf2" ]]; then
+        _audit_add kdf pass "Password KDF" "PBKDF2-HMAC-SHA256, ${ENC_DEFAULT_ITER} iterations (selected by ENCRYPTOR_KDF; OWASP minimum 600,000)."
+    else
+        _audit_add kdf warn "Password KDF" "This OpenSSL build cannot seal keys with scrypt; falling back to PBKDF2 (${ENC_DEFAULT_ITER} iterations, not memory-hard)." "Upgrade OpenSSL (1.1.1+ / 3.x) and use long passphrases"
+    fi
+
+    # 6. State directory permissions
+    local mode; mode=$(get_file_mode "$CONFIG_DIR")
+    if [[ "$mode" == "700" ]]; then _audit_add config-perms pass "Configuration directory" "$CONFIG_DIR is private (mode 700)."
+    else _audit_add config-perms fail "Configuration directory" "$CONFIG_DIR has mode ${mode:-?}; other users may read keys or logs." "chmod 700 '$CONFIG_DIR'"; fi
+    mode=$(get_file_mode "$CERT_DIR")
+    if [[ "$mode" != "700" ]]; then _audit_add cert-dir-perms fail "Key store directory" "$CERT_DIR has mode ${mode:-?}." "chmod 700 '$CERT_DIR'"; fi
+
+    # 7. Private keys: permissions, passphrase protection, strength of that protection
+    local k total=0 loose="" unprotected=0 weakkdf="" it
+    for k in "$CERT_DIR"/*.key; do
+        [[ -f "$k" ]] || continue
+        (( total++ ))
+        mode=$(get_file_mode "$k")
+        [[ "$mode" == "400" || "$mode" == "600" ]] || loose+="$(ui_base "$k")($mode) "
+        if crypto_key_is_encrypted "$k"; then
+            # PBKDF2 iteration count inside the PKCS#8 envelope (first INTEGER after the PBKDF2 identifier).
+            it=$(openssl asn1parse -in "$k" 2>/dev/null | awk '/:PBKDF2/ { f = 1; next } f == 1 && /INTEGER/ { sub(/.*:/, ""); print; f = 2 }')
+            if [[ "$it" =~ ^[0-9A-Fa-f]{1,8}$ ]] && (( 16#$it < 100000 )); then weakkdf+="$(ui_base "$k")($(( 16#$it )) iterations) "; fi
+        else
+            (( unprotected++ ))
+        fi
+    done
+    if (( total == 0 )); then _audit_add key-perms info "Private key permissions" "No private keys in the store."
+    elif [[ -z "$loose" ]]; then _audit_add key-perms pass "Private key permissions" "All $total key(s) are owner-only (400/600)."
+    else _audit_add key-perms fail "Private key permissions" "Readable by others: ${loose% }" "chmod 400 '$CERT_DIR'/*.key"; fi
+    if (( total > 0 )); then
+        if (( unprotected > 0 )); then
+            _audit_add key-encryption warn "Private key protection" "$unprotected of $total key(s) are stored without a passphrase." "openssl pkcs8 -topk8 -v2 aes-256-cbc -iter 600000 -in KEY -out KEY.new"
+        elif [[ -n "$weakkdf" ]]; then
+            _audit_add key-encryption warn "Private key protection" "Passphrase-protected with a weak work factor: ${weakkdf% }" "openssl pkcs8 -topk8 -v2 aes-256-cbc -iter 600000 -in KEY -out KEY.new"
+        else
+            _audit_add key-encryption pass "Private key protection" "All $total key(s) are passphrase-protected."
+        fi
+    fi
+
+    # 8. Certificates: expiry and strength. Files that are not certificates are
+    #    reported, never silently skipped; a private key saved as .pem is an error.
+    local f expired="" expiring="" weak="" unsure="" ncert=0 level msg unreadable="" keyinpem=""
+    for f in "$CERT_DIR"/*.pem; do
+        [[ -f "$f" ]] || continue
+        if grep -q -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' -- "$f" 2>/dev/null; then
+            keyinpem+="$(ui_base "$f")($(get_file_mode "$f")) "
+        fi
+        if ! pki_cert_info "$f"; then unreadable+="$(ui_base "$f") "; continue; fi
+        (( ncert++ ))
+        case "${PKI_INFO[status]}" in
+            expired)  expired+="$(ui_base "$f") " ;;
+            expiring) expiring+="$(ui_base "$f")(${PKI_INFO[days_left]}d) " ;;
+        esac
+        while IFS='|' read -r level msg; do
+            [[ "$level" == "fail" && "$msg" != *EXPIRED* ]] && weak+="$(ui_base "$f"): $msg "
+            [[ "$level" == "warn" && "$msg" == Unrecognised* ]] && unsure+="$(ui_base "$f"): $msg "
+        done < <(pki_cert_findings)
+    done
+    if [[ -n "$keyinpem" ]]; then
+        _audit_add key-in-pem fail "Private key in a certificate file" "These .pem files contain a private key: ${keyinpem% }" "Move the key to a .key file with mode 400"
+    fi
+    if [[ -n "$unreadable" ]]; then
+        _audit_add cert-unreadable warn "Unreadable certificate files" "Not valid X.509 certificates: ${unreadable% }" "Remove or repair these files"
+    fi
+    if (( ncert == 0 )); then _audit_add cert-expiry info "Certificate expiry" "No certificates in the store."
+    elif [[ -n "$expired" ]]; then _audit_add cert-expiry fail "Certificate expiry" "Expired: ${expired% }${expiring:+ — expiring soon: ${expiring% }}" "Re-issue the certificate(s)"
+    elif [[ -n "$expiring" ]]; then _audit_add cert-expiry warn "Certificate expiry" "Expiring within ${PKI_EXPIRY_WARN_DAYS} days: ${expiring% }" "Plan renewal"
+    else _audit_add cert-expiry pass "Certificate expiry" "All $ncert certificate(s) are valid for more than ${PKI_EXPIRY_WARN_DAYS} days."; fi
+    if (( ncert > 0 )); then
+        if [[ -n "$weak" ]]; then _audit_add cert-strength fail "Certificate strength" "${weak% }" "Replace the affected certificate(s)"
+        elif [[ -n "$unsure" ]]; then _audit_add cert-strength warn "Certificate strength" "${unsure% }" "Review these certificates manually"
+        else _audit_add cert-strength pass "Certificate strength" "No weak keys or deprecated signature algorithms."; fi
+    fi
+
+    # 9. Operation log
+    if [[ -f "$LOG_FILE" ]]; then
+        mode=$(get_file_mode "$LOG_FILE")
+        if [[ "$mode" == "600" || "$mode" == "400" ]]; then _audit_add log-perms pass "Operation log" "$LOG_FILE is private (mode $mode)."
+        else _audit_add log-perms fail "Operation log" "$LOG_FILE has mode ${mode:-?}; it reveals file names to other users." "chmod 600 '$LOG_FILE'"; fi
+    fi
+
+    # 10. Leftovers of a crashed or killed run: temp directories in TMPDIR, and
+    #     in-progress output files (which, for a decryption, hold plaintext).
+    local stale=0 d name tmp_root="${TMPDIR:-/tmp}"
+    for d in "$tmp_root"/encryptor.?????????? "$tmp_root"/encryptor_[0-9]*; do
+        [[ -d "$d" && "$d" != "${TEMP_DIR:-/nonexistent}" ]] || continue
+        name="${d##*/}"
+        [[ "$name" =~ ^encryptor\.[A-Za-z0-9]{10}$ || "$name" =~ ^encryptor_[0-9]+$ ]] || continue
+        [[ -n "$(find "$d" -maxdepth 0 -mmin +60 2>/dev/null)" ]] && (( stale++ ))
+    done
+    if (( stale == 0 )); then _audit_add temp pass "Temporary files" "No stale temporary directories."
+    else _audit_add temp warn "Temporary files" "$stale stale temporary director(ies) in ${tmp_root} (left by an interrupted run)." "Run ./uninstall.sh, or remove the encryptor.XXXXXXXXXX directories older than an hour"; fi
+    local parts=0
+    for f in "$scan_dir"/*.encryptor-part.*; do [[ -f "$f" ]] && (( parts++ )); done
+    if (( parts > 0 )); then
+        _audit_add partial fail "Interrupted output files" "$parts in-progress file(s) (*.encryptor-part.*) in the current directory; they may contain plaintext." "Delete them (shred -u) after checking nothing is still running"
+    fi
+
+    # 11. Legacy, unauthenticated files in the scanned directory (2.x password
+    #     files and 2.x S/MIME files).
+    local legacy=0 n=0 magic
+    for f in "$scan_dir"/*.enc; do
+        [[ -f "$f" ]] || continue
+        (( n++ )); (( n > 500 )) && break
+        magic=$(file_magic_hex "$f" 16)
+        [[ "$magic" == 53616c7465645f5f* || "$magic" == 2d2d2d2d2d424547494e20504b435337* ]] && (( legacy++ ))
+    done
+    if (( legacy > 0 )); then
+        _audit_add legacy warn "Legacy encrypted files" "$legacy file(s) in $(ui_pathfit "$(cd "$scan_dir" 2>/dev/null && pwd)") use an unauthenticated 2.x format." "Decrypt them with --legacy and re-encrypt to upgrade to ENCRYPTOR/3"
+    else
+        _audit_add legacy pass "Legacy encrypted files" "No unauthenticated 2.x files in the current directory."
+    fi
+
+    # 12. Process hygiene
+    local cores; cores=$(ulimit -c 2>/dev/null)
+    if [[ "$cores" == "0" ]]; then _audit_add coredump pass "Core dumps" "Disabled for this session (ulimit -c 0)."
+    else _audit_add coredump info "Core dumps" "Enabled (ulimit -c ${cores:-?}); a crash could write secrets held in memory to disk."; fi
+    if have shred; then _audit_add shred info "Secure delete" "shred is available. Overwriting is best-effort on SSDs and copy-on-write filesystems."
+    else _audit_add shred info "Secure delete" "shred not found; a single random overwrite is used instead (best-effort)."; fi
+    return 0
+}
+
+audit_percent() { if (( AUDIT_MAX > 0 )); then printf '%d' $(( AUDIT_SCORE * 100 / AUDIT_MAX )); else printf '100'; fi; }
+
+audit_report_text() {
+    local i st col mark pct detail room
+    for (( i = 0; i < ${#AUDIT_ID[@]}; i++ )); do
+        st="${AUDIT_STATUS[$i]}"
+        case "$st" in
+            pass) col="$C_OK";   mark="$G_OK" ;;
+            warn) col="$C_WARN"; mark="$G_WARN" ;;
+            fail) col="$C_ERR";  mark="$G_ERR" ;;
+            *)    col="$C_INFO"; mark="$G_INFO" ;;
+        esac
+        detail="${AUDIT_DETAIL[$i]}"
+        if [[ "$st" == "pass" || "$st" == "info" ]]; then
+            # Compact: one line, detail trimmed to the terminal width.
+            room=$(( UI_W - 34 )); (( room < 10 )) && room=10
+            printf '  %s%s%s %s%-26s%s %s%s%s\n' "$col" "$mark" "$RESET" "$BOLD" "$(ui_fit "${AUDIT_TITLE[$i]}" 26)" "$RESET" \
+                "$C_MUTED" "$(ui_fit "$detail" "$room")" "$RESET"
+        else
+            printf '  %s%s %s%s%s %s%s%s\n' "$col" "$mark" "$BOLD" "${AUDIT_TITLE[$i]}" "$RESET" "$col" "(${st})" "$RESET"
+            [[ -n "$detail" ]] && printf '      %s\n' "$detail"
+            [[ -n "${AUDIT_FIX[$i]}" ]] && printf '      %sFix:%s %s\n' "$C_KEY" "$RESET" "${AUDIT_FIX[$i]}"
+        fi
+    done
+    pct=$(audit_percent)
+    col="$C_OK"; local verdict="Excellent"
+    if   (( AUDIT_FAILS > 0 )); then col="$C_ERR";  verdict="Action required"
+    elif (( AUDIT_WARNS > 0 )); then col="$C_WARN"; verdict="Good, review the warnings"; fi
+    printf '\n  %sScore%s  %s  %s%s%d%%%s  %s%s%s  %s(%d failed, %d warning(s))%s\n' "$BOLD" "$RESET" \
+        "$(ui_meter "$pct" 100 30 "$col")" "$col" "$BOLD" "$pct" "$RESET" "$col" "$verdict" "$RESET" "$C_MUTED" "$AUDIT_FAILS" "$AUDIT_WARNS" "$RESET"
+}
+
+audit_report_json() {
+    local i
+    printf '{"version":"%s","openssl":"%s","score":%d,"max_score":%d,"percent":%d,"failed":%d,"warnings":%d,"checks":[' \
+        "$ENCRYPTOR_VERSION" "$(json_escape "$OPENSSL_VERSION_TEXT")" "$AUDIT_SCORE" "$AUDIT_MAX" "$(audit_percent)" "$AUDIT_FAILS" "$AUDIT_WARNS"
+    for (( i = 0; i < ${#AUDIT_ID[@]}; i++ )); do
+        (( i > 0 )) && printf ','
+        printf '{"id":"%s","status":"%s","title":"%s","detail":"%s","fix":"%s"}' \
+            "${AUDIT_ID[$i]}" "${AUDIT_STATUS[$i]}" "$(json_escape "${AUDIT_TITLE[$i]}")" \
+            "$(json_escape "${AUDIT_DETAIL[$i]}")" "$(json_escape "${AUDIT_FIX[$i]}")"
+    done
+    printf ']}\n'
+}
+
+# --- Remote TLS scan (testssl.sh) -------------------------------------------
+audit_testssl_path() {
+    local p
+    for p in testssl.sh testssl; do
+        if have "$p"; then command -v "$p"; return 0; fi
+    done
+    [[ -x "$TOOLS_DIR/testssl.sh/testssl.sh" ]] && { printf '%s' "$TOOLS_DIR/testssl.sh/testssl.sh"; return 0; }
+    return 1
+}
+
+# Strict target grammar: host name, IPv4 or [IPv6], optional :port. Anything
+# else (including option-like strings such as "--file=…") is rejected, so user
+# input can never be interpreted as a testssl.sh option.
+audit_valid_target() {
+    local t="$1"
+    [[ ${#t} -le 253 ]] || return 1
+    [[ "$t" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ ]] && return 0
+    [[ "$t" =~ ^\[[0-9A-Fa-f:]+\](:[0-9]{1,5})?$ ]] && return 0
+    return 1
+}
+
+audit_install_testssl() {
+    ENC_ERR=""
+    have git || { ENC_ERR="git is required to install testssl.sh."; return "$EX_FAIL"; }
+    core_init_state
+    local dest="$TOOLS_DIR/testssl.sh" staging="$TOOLS_DIR/.testssl.staging.$$" got
+    rm -rf -- "$staging"
+    if ! GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch "$TESTSSL_TAG" "$TESTSSL_REPO" "$staging" 2>/dev/null; then
+        rm -rf -- "$staging"; ENC_ERR="Download failed (network unavailable, or tag $TESTSSL_TAG not found)."; return "$EX_FAIL"
+    fi
+    got=$(git -C "$staging" rev-parse HEAD 2>/dev/null)
+    if [[ "$got" != "$TESTSSL_COMMIT" ]]; then
+        rm -rf -- "$staging"
+        ENC_ERR="testssl.sh $TESTSSL_TAG is not the reviewed commit (got ${got:-nothing}, expected $TESTSSL_COMMIT). Nothing was installed."
+        return "$EX_FAIL"
+    fi
+    [[ -f "$staging/testssl.sh" ]] || { rm -rf -- "$staging"; ENC_ERR="Unexpected repository content."; return "$EX_FAIL"; }
+    # Swap in the new copy; keep the old one until the new one is in place.
+    local old="$TOOLS_DIR/.testssl.old.$$"
+    rm -rf -- "$old"
+    [[ -e "$dest" ]] && { mv -- "$dest" "$old" || { rm -rf -- "$staging"; ENC_ERR="Could not replace $dest"; return "$EX_FAIL"; }; }
+    if ! mv -- "$staging" "$dest"; then
+        [[ -e "$old" ]] && mv -- "$old" "$dest"
+        rm -rf -- "$staging"; ENC_ERR="Could not install into $dest"; return "$EX_FAIL"
+    fi
+    rm -rf -- "$old"
+    chmod 755 "$dest/testssl.sh" 2>/dev/null || true
+    log_operation "INFO" "testssl.sh $TESTSSL_TAG installed (commit ${got:0:12})"
+    return 0
+}
+
+# ==============================================================================
+# Interactive screens
+# ==============================================================================
+audit_ui_menu() {
+    local rc
     while true; do
-        print_section_header "Security Audit"
-        echo -e "  ${PURPLE}${BOLD}[1]${RESET} ${WHITE}Local System Audit${RESET}            ${DIM}(7 security checks + score)${RESET}"
-        echo -e "  ${PURPLE}${BOLD}[2]${RESET} ${WHITE}Certificate Security Analysis${RESET}  ${DIM}(local certificate deep-dive)${RESET}"
-        echo -e "  ${YELLOW}${BOLD}[3]${RESET} ${WHITE}Remote SSL/TLS Scanner${RESET}         ${DIM}(requires testssl.sh)${RESET}"
-        echo -e "  ${YELLOW}${BOLD}[4]${RESET} ${WHITE}Install testssl.sh${RESET}             ${DIM}(for remote scanning)${RESET}"
-        echo -e "  ${YELLOW}${BOLD}[q]${RESET} ${WHITE}Return to Main Menu${RESET}"
-
-        echo -en "\n${MAGENTA}${BOLD}Your choice: ${RESET}"
-        read -r choice
-        choice=$(echo "$choice" | tr -d '[:space:]')
-
-        case "$choice" in
-            1) _audit_local ;;
-            2) _audit_certificate ;;
-            3) _audit_remote ;;
-            4) _audit_install_testssl ;;
-            q|Q) break ;;
-            *)
-                echo -e "${RED}Invalid choice.${RESET}"
-                sleep 1
-                ;;
+        local tpath tnote="not installed"
+        tpath=$(audit_testssl_path) && tnote="$(ui_pathfit "$tpath")"
+        UI_SEL_HEADER="$(tui_header "Security audit")"
+        ui_select "What would you like to check?" \
+            "1|Local audit|self-test, permissions, keys, certificates, legacy files" \
+            "2|Remote TLS scan|testssl.sh ${G_DOT} ${tnote}" \
+            "3|Install / update testssl.sh|pinned release ${TESTSSL_TAG}, commit-verified" \
+            "-" \
+            "q|Back|"
+        rc=$?
+        (( rc != 0 )) && return 0
+        case "$UI_CHOICE" in
+            1) audit_ui_local ;;
+            2) audit_ui_remote ;;
+            3) audit_ui_install ;;
+            q) return 0 ;;
         esac
     done
 }
 
-# --- 1. Local System Audit ---
-_audit_local() {
-    print_section_header "Local System Audit"
-    echo -e "${DIM}Running security checks on your local environment...${RESET}\n"
-
-    local score=0
-    local max_score=8
-
-    # ── Check 1: OpenSSL version ──────────────────────────────────────────────
-    echo -e "${PURPLE}${BOLD}1. OpenSSL Version & Capabilities${RESET}"
-    local openssl_version; openssl_version=$(openssl version 2>/dev/null)
-    local ver_num; ver_num=$(echo "$openssl_version" | awk '{print $2}')
-    echo -e "  ${WHITE}Installed:${RESET} $openssl_version"
-
-    local major; major=$(echo "$ver_num" | cut -d. -f1)
-    local minor; minor=$(echo "$ver_num" | cut -d. -f2)
-    local patch; patch=$(echo "$ver_num" | cut -d. -f3 | tr -d 'a-z')
-
-    if [[ "$major" -ge 3 ]] || { [[ "$major" -eq 1 ]] && [[ "$minor" -eq 1 ]] && [[ "${patch:-0}" -ge 1 ]]; }; then
-        echo -e "  ${LIME}[OK] Version: $ver_num — modern (1.1.1+ or 3.x)${RESET}"
-        ((score++))
-    else
-        echo -e "  ${ORANGE}[!] Version: $ver_num — outdated. Upgrade to OpenSSL 3.x recommended.${RESET}"
-    fi
-
-    # Check AES-GCM support
-    if openssl enc -aes-256-gcm -help &>/dev/null; then
-        echo -e "  ${LIME}[OK] AES-256-GCM: Supported (true AEAD encryption available)${RESET}"
-        ((score++))
-    else
-        echo -e "  ${ORANGE}[!] AES-256-GCM: Not supported — upgrade OpenSSL for authenticated encryption${RESET}"
-    fi
-
-    # ── Check 2: Private key permissions ─────────────────────────────────────
-    echo -e "\n${PURPLE}${BOLD}2. Private Key Permissions${RESET}"
-    if ! ls "$CERT_DIR"/*.key &>/dev/null 2>&1; then
-        echo -e "  ${BLUE}[i] No private keys found in $CERT_DIR — OK${RESET}"
-        ((score++))
-    else
-        local insecure=0 total_keys=0
-        for key in "$CERT_DIR"/*.key; do
-            [[ -f "$key" ]] || continue
-            ((total_keys++))
-            local perms; perms=$(stat -c "%a" "$key" 2>/dev/null || stat -f "%Lp" "$key" 2>/dev/null)
-            if [[ "$perms" != "400" && "$perms" != "600" ]]; then
-                echo -e "  ${RED}[X] Insecure: $(basename "$key") (mode: $perms)${RESET}"
-                echo -e "      ${DIM}Fix: chmod 400 $key${RESET}"
-                ((insecure++))
-            fi
-        done
-        if [[ $insecure -eq 0 ]]; then
-            echo -e "  ${LIME}[OK] All $total_keys key(s) have secure permissions (400/600)${RESET}"
-            ((score++))
-        else
-            echo -e "  ${RED}[X] $insecure/$total_keys key(s) have insecure permissions${RESET}"
-        fi
-    fi
-
-    # ── Check 3: Certificate expiration ──────────────────────────────────────
-    echo -e "\n${PURPLE}${BOLD}3. Certificate Expiration${RESET}"
-    if ! ls "$CERT_DIR"/*.pem &>/dev/null 2>&1; then
-        echo -e "  ${BLUE}[i] No certificates found — OK${RESET}"
-        ((score++))
-    else
-        local expired=0 expiring=0 total_certs=0
-        for cert in "$CERT_DIR"/*.pem; do
-            [[ -f "$cert" ]] || continue
-            ((total_certs++))
-            openssl x509 -in "$cert" -noout -checkend 0 &>/dev/null || { ((expired++)); continue; }
-            openssl x509 -in "$cert" -noout -checkend 2592000 &>/dev/null || ((expiring++))
-        done
-        if [[ $expired -eq 0 && $expiring -eq 0 ]]; then
-            echo -e "  ${LIME}[OK] All $total_certs cert(s) valid and not expiring soon${RESET}"
-            ((score++))
-        elif [[ $expired -eq 0 ]]; then
-            echo -e "  ${ORANGE}[!] $expiring/$total_certs cert(s) expiring within 30 days${RESET}"
-            ((score++))
-        else
-            echo -e "  ${RED}[X] $expired expired, $expiring expiring soon (of $total_certs)${RESET}"
-        fi
-    fi
-
-    # ── Check 4: Config directory permissions ─────────────────────────────────
-    echo -e "\n${PURPLE}${BOLD}4. Configuration Directory Security${RESET}"
-    if [[ -d "$CONFIG_DIR" ]]; then
-        local dir_perms; dir_perms=$(stat -c "%a" "$CONFIG_DIR" 2>/dev/null || stat -f "%Lp" "$CONFIG_DIR")
-        if [[ "$dir_perms" == "700" ]] || [[ "$dir_perms" == "755" ]]; then
-            echo -e "  ${LIME}[OK] $CONFIG_DIR — permissions: $dir_perms${RESET}"
-            ((score++))
-        else
-            echo -e "  ${ORANGE}[!] Unusual permissions: $dir_perms (recommended: 700)${RESET}"
-            echo -e "      ${DIM}Fix: chmod 700 $CONFIG_DIR${RESET}"
-        fi
-    else
-        echo -e "  ${BLUE}[i] Config directory not yet created — OK${RESET}"
-        ((score++))
-    fi
-
-    # ── Check 5: Temp files ───────────────────────────────────────────────────
-    echo -e "\n${PURPLE}${BOLD}5. Stale Temporary Files${RESET}"
-    local old_tmps; old_tmps=$(find /tmp -maxdepth 1 -name "encryptor_*" -type d -mtime +1 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "$old_tmps" -eq 0 ]]; then
-        echo -e "  ${LIME}[OK] No stale encryptor temp directories${RESET}"
-        ((score++))
-    else
-        echo -e "  ${ORANGE}[!] $old_tmps old temp director(ies) found in /tmp${RESET}"
-        echo -e "      ${DIM}Run: rm -rf /tmp/encryptor_*${RESET}"
-        ((score++))  # Low severity — auto-cleaned on next launch
-    fi
-
-    # ── Check 6: Bash version ─────────────────────────────────────────────────
-    echo -e "\n${PURPLE}${BOLD}6. Shell Environment${RESET}"
-    local bash_ver; bash_ver=$(bash --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
-    local bash_major; bash_major=$(echo "$bash_ver" | cut -d. -f1)
-    if [[ "${bash_major:-0}" -ge 5 ]]; then
-        echo -e "  ${LIME}[OK] Bash $bash_ver — excellent (5.x+)${RESET}"
-        ((score++))
-    elif [[ "${bash_major:-0}" -ge 4 ]]; then
-        echo -e "  ${GREEN}[OK] Bash $bash_ver — supported (4.x)${RESET}"
-        ((score++))
-    else
-        echo -e "  ${ORANGE}[!] Bash $bash_ver — upgrade to 4.0+ recommended${RESET}"
-    fi
-
-    # ── Check 7: Integrity sidecar files ─────────────────────────────────────
-    echo -e "\n${PURPLE}${BOLD}7. Encrypted File Integrity Sidecars${RESET}"
-    local enc_files; enc_files=$(find . -maxdepth 2 -name "*.enc" 2>/dev/null | wc -l | tr -d ' ')
-    local sha_files; sha_files=$(find . -maxdepth 2 -name "*.enc.sha256" 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "$enc_files" -eq 0 ]]; then
-        echo -e "  ${BLUE}[i] No .enc files in current directory${RESET}"
-        ((score++))
-    elif [[ "$sha_files" -ge "$enc_files" ]]; then
-        echo -e "  ${LIME}[OK] All $enc_files .enc file(s) have SHA-256 integrity sidecar${RESET}"
-        ((score++))
-    else
-        local missing=$(( enc_files - sha_files ))
-        echo -e "  ${ORANGE}[!] $missing .enc file(s) missing .sha256 sidecar (tamper detection unavailable)${RESET}"
-    fi
-
-    # ── Check 8: PBKDF2 iteration sanity ─────────────────────────────────────
-    echo -e "\n${PURPLE}${BOLD}8. PBKDF2 Configuration${RESET}"
-    if [[ "${PBKDF2_ITER:-0}" -ge 600000 ]]; then
-        echo -e "  ${LIME}[OK] PBKDF2 iterations: ${PBKDF2_ITER} — meets NIST SP 800-132 & OWASP 2024${RESET}"
-        ((score++))
-    else
-        echo -e "  ${ORANGE}[!] PBKDF2 iterations: ${PBKDF2_ITER:-unknown} — below OWASP 2024 recommendation (600,000)${RESET}"
-    fi
-
-    # ── Summary ───────────────────────────────────────────────────────────────
-    echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════${RESET}"
-    local pct=$(( score * 100 / max_score ))
-    if [[ $pct -ge 90 ]]; then
-        echo -e "${LIME}${BOLD}  Security Score: ${score}/${max_score} (${pct}%) — Excellent 🛡${RESET}"
-    elif [[ $pct -ge 75 ]]; then
-        echo -e "${GREEN}${BOLD}  Security Score: ${score}/${max_score} (${pct}%) — Good${RESET}"
-    elif [[ $pct -ge 50 ]]; then
-        echo -e "${YELLOW}${BOLD}  Security Score: ${score}/${max_score} (${pct}%) — Acceptable — review warnings above${RESET}"
-    else
-        echo -e "${RED}${BOLD}  Security Score: ${score}/${max_score} (${pct}%) — Needs Improvement${RESET}"
-    fi
-    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${RESET}"
-
-    log_operation "INFO" "Local audit completed: ${score}/${max_score}"
-    press_enter_to_continue
+audit_ui_local() {
+    tui_screen "Local security audit" "Read-only checks of this installation and of $(ui_pathfit "$PWD")"
+    ui_spinner_start "Running checks${G_ELLIPSIS}"
+    audit_run "."
+    ui_spinner_stop
+    audit_report_text
+    log_operation "INFO" "Local audit: $(audit_percent)% (${AUDIT_FAILS} failed, ${AUDIT_WARNS} warnings)"
+    ui_pause
 }
 
-# --- 2. Certificate Security Analysis ---
-_audit_certificate() {
-    print_section_header "Certificate Security Analysis"
-    echo -e "${DIM}Deep security analysis of a local X.509 certificate.${RESET}\n"
-
-    if ! ls "$CERT_DIR"/*.pem &>/dev/null 2>&1; then
-        echo -e "${YELLOW}No certificates in $CERT_DIR.${RESET}"
-        echo -e "${DIM}Use Certificate Manager → [1] to create a CA first.${RESET}"
-        press_enter_to_continue; return
+audit_ui_remote() {
+    tui_screen "Remote TLS scan" "Runs testssl.sh against a server you are authorised to test."
+    local tool
+    if ! tool=$(audit_testssl_path); then
+        ui_warn "testssl.sh is not installed. Use \"Install / update testssl.sh\" first."
+        ui_pause; return 0
     fi
-
-    echo -e "${BLUE}Available certificates:${RESET}"
-    local cn=1
-    local cert_list=()
-    for cert in "$CERT_DIR"/*.pem; do
-        [[ -f "$cert" ]] || continue
-        cert_list+=("$cert")
-        echo -e "  ${YELLOW}[$cn]${RESET} $(basename "$cert")"
-        ((cn++))
-    done
-
-    echo -en "\n${MAGENTA}Certificate (number or path): ${RESET}"
-    read -r cert_input
-    cert_input=$(echo "$cert_input" | xargs 2>/dev/null || echo "$cert_input")
-
-    local cert_file=""
-    if [[ "$cert_input" =~ ^[0-9]+$ ]] && \
-       [[ "$cert_input" -ge 1 ]] && [[ "$cert_input" -le ${#cert_list[@]} ]]; then
-        cert_file="${cert_list[$((cert_input-1))]}"
-    else
-        cert_file="$cert_input"
-        [[ ! -f "$cert_file" ]] && cert_file="$CERT_DIR/$cert_input"
+    ui_prompt "Host[:port] to scan (e.g. example.com or example.com:8443)" "" || return 0
+    local target="$UI_REPLY"
+    [[ -z "$target" ]] && return 0
+    if ! audit_valid_target "$target"; then
+        ui_err "Invalid target. Use a host name or IP address, optionally followed by :port."
+        ui_pause; return 0
     fi
-
-    if [[ ! -f "$cert_file" ]]; then
-        echo -e "${RED}Certificate not found!${RESET}"
-        press_enter_to_continue; return
-    fi
-
-    print_section_header "Analysis: $(basename "$cert_file")"
-
-    # 1. Basic info
-    echo -e "${CYAN}${BOLD}1. Identity${RESET}"
-    local subject; subject=$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null | sed 's/subject=//')
-    local issuer;  issuer=$(openssl x509 -in "$cert_file" -noout -issuer  2>/dev/null | sed 's/issuer=//')
-    local serial;  serial=$(openssl x509 -in "$cert_file" -noout -serial  2>/dev/null | cut -d= -f2)
-    echo -e "  ${WHITE}Subject:${RESET}  ${DIM}$subject${RESET}"
-    echo -e "  ${WHITE}Issuer:${RESET}   ${DIM}$issuer${RESET}"
-    echo -e "  ${WHITE}Serial:${RESET}   ${DIM}$serial${RESET}"
-
-    # 2. Validity
-    echo -e "\n${CYAN}${BOLD}2. Validity${RESET}"
-    local not_before; not_before=$(openssl x509 -in "$cert_file" -noout -startdate 2>/dev/null | cut -d= -f2)
-    local not_after;  not_after=$(openssl x509 -in "$cert_file" -noout -enddate   2>/dev/null | cut -d= -f2)
-    echo -e "  ${WHITE}From:${RESET}   $not_before"
-    echo -e "  ${WHITE}Until:${RESET}  $not_after"
-
-    openssl x509 -in "$cert_file" -noout -checkend 0 &>/dev/null
-    if [[ $? -eq 0 ]]; then
-        openssl x509 -in "$cert_file" -noout -checkend 2592000 &>/dev/null
-        [[ $? -ne 0 ]] && echo -e "  ${ORANGE}[!] Expiring within 30 days${RESET}" || \
-                          echo -e "  ${LIME}[OK] Valid${RESET}"
-    else
-        echo -e "  ${RED}[X] EXPIRED${RESET}"
-    fi
-
-    # 3. Key strength
-    echo -e "\n${CYAN}${BOLD}3. Key Strength${RESET}"
-    local key_algo; key_algo=$(openssl x509 -in "$cert_file" -noout -text 2>/dev/null | grep "Public Key Algorithm" | awk '{print $NF}')
-    local key_bits; key_bits=$(openssl x509 -in "$cert_file" -noout -text 2>/dev/null | grep -oE 'Public-Key: \([0-9]+ bit\)' | grep -oE '[0-9]+')
-    echo -e "  ${WHITE}Algorithm:${RESET} $key_algo"
-    echo -e "  ${WHITE}Key Size:${RESET}  ${BOLD}${key_bits} bits${RESET}"
-
-    if [[ "$key_algo" == *"rsaEncryption"* ]]; then
-        if   [[ "${key_bits:-0}" -ge 4096 ]]; then echo -e "  ${LIME}[OK] Strength: Excellent (4096+ bit RSA)${RESET}"
-        elif [[ "${key_bits:-0}" -ge 2048 ]]; then echo -e "  ${GREEN}[OK] Strength: Good (2048+ bit RSA)${RESET}"
-        elif [[ "${key_bits:-0}" -ge 1024 ]]; then echo -e "  ${ORANGE}[!] Strength: Weak — upgrade to ≥2048 bit${RESET}"
-        else                                        echo -e "  ${RED}[X] Strength: Insecure — DO NOT USE${RESET}"; fi
-    elif [[ "$key_algo" == *"id-ecPublicKey"* ]]; then
-        if [[ "${key_bits:-0}" -ge 256 ]]; then echo -e "  ${LIME}[OK] ECDSA: Good (≥256 bit)${RESET}"
-        else                                     echo -e "  ${ORANGE}[!] ECDSA curve may be weak${RESET}"; fi
-    fi
-
-    # 4. Signature algorithm
-    echo -e "\n${CYAN}${BOLD}4. Signature Algorithm${RESET}"
-    local sig_algo; sig_algo=$(openssl x509 -in "$cert_file" -noout -text 2>/dev/null | grep "Signature Algorithm" | head -1 | awk '{print $3}')
-    echo -e "  ${WHITE}Algorithm:${RESET} $sig_algo"
-    if   [[ "$sig_algo" == *"sha256"* || "$sig_algo" == *"sha384"* || "$sig_algo" == *"sha512"* ]]; then
-        echo -e "  ${LIME}[OK] Modern (SHA-256/384/512)${RESET}"
-    elif [[ "$sig_algo" == *"sha1"* ]]; then
-        echo -e "  ${RED}[X] SHA-1 is deprecated — do not use for new certificates${RESET}"
-    elif [[ "$sig_algo" == *"md5"* ]]; then
-        echo -e "  ${RED}[X] MD5 is broken — replace immediately${RESET}"
-    fi
-
-    # 5. Self-signed?
-    echo -e "\n${CYAN}${BOLD}5. Certificate Type${RESET}"
-    [[ "$subject" == "$issuer" ]] && \
-        echo -e "  ${BLUE}[i] Self-signed (Root CA or test certificate)${RESET}" || \
-        echo -e "  ${GREEN}[OK] CA-signed${RESET}"
-
-    # 6. Fingerprints
-    echo -e "\n${CYAN}${BOLD}6. Fingerprints${RESET}"
-    local fp256; fp256=$(openssl x509 -in "$cert_file" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
-    local fp1;   fp1=$(openssl x509 -in "$cert_file" -noout -fingerprint -sha1   2>/dev/null | cut -d= -f2)
-    echo -e "  ${WHITE}SHA-256:${RESET} ${DIM}$fp256${RESET}"
-    echo -e "  ${WHITE}SHA-1:${RESET}   ${DIM}$fp1${RESET}  ${ORANGE}(SHA-1 for reference only)${RESET}"
-
-    echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════${RESET}"
-    echo -e "${WHITE}${BOLD}Analysis complete.${RESET}"
-    press_enter_to_continue
+    ui_note "Only scan systems you own or have permission to test. This can take several minutes."
+    ui_confirm "Start the scan of ${target}?" y || return 0
+    log_operation "INFO" "Remote TLS scan started: $target"
+    echo
+    "$tool" --protocols --server-defaults --vulnerable --quiet "$target"
+    ui_pause "Scan finished — press Enter to continue"
 }
 
-# --- 3. Remote SSL/TLS Scan ---
-_audit_remote() {
-    if [[ ! -f "$TESTSSL_PATH" ]]; then
-        echo -e "\n${YELLOW}testssl.sh is not installed.${RESET}"
-        echo -e "${DIM}Use option [4] to install it.${RESET}"
-        press_enter_to_continue; return
-    fi
-
-    print_section_header "Remote SSL/TLS Scanner"
-    echo -e "${DIM}Full SSL/TLS scan of a remote server using testssl.sh.${RESET}\n"
-
-    echo -en "${MAGENTA}${BOLD}Domain or IP to scan (e.g., example.com): ${RESET}"
-    read -r domain
-    domain=$(echo "$domain" | xargs 2>/dev/null || echo "$domain")
-
-    if [[ -z "$domain" ]]; then
-        echo -e "${RED}No target provided.${RESET}"
-        press_enter_to_continue; return
-    fi
-
-    # Basic input validation — no spaces, semicolons, or backticks
-    if [[ "$domain" =~ [[:space:]\;\`\|] ]]; then
-        echo -e "${RED}Invalid characters in domain/IP.${RESET}"
-        press_enter_to_continue; return
-    fi
-
-    echo -e "\n${CYAN}Scanning ${BOLD}${domain}${RESET}${CYAN}...${RESET}"
-    echo -e "${DIM}This may take several minutes.${RESET}\n"
-    "$TESTSSL_PATH" -p "$domain"
-    echo -e "\n${GREEN}Scan complete.${RESET}"
-    press_enter_to_continue
-}
-
-# --- 4. Install testssl.sh ---
-_audit_install_testssl() {
-    print_section_header "Install testssl.sh"
-
-    if ! command -v git >/dev/null 2>&1; then
-        echo -e "${RED}git is required to install testssl.sh.${RESET}"
-        echo -e "${YELLOW}Install git: sudo apt install git${RESET}"
-        press_enter_to_continue; return
-    fi
-
-    echo -e "${BLUE}Cloning testssl.sh into $TOOLS_DIR/testssl.sh ...${RESET}"
-    rm -rf "$TOOLS_DIR/testssl.sh" 2>/dev/null
-
-    if git clone --depth 1 https://github.com/drwetter/testssl.sh.git "$TOOLS_DIR/testssl.sh"; then
-        echo -e "${LIME}${BOLD}✓ testssl.sh installed successfully.${RESET}"
-        log_operation "INFO" "testssl.sh installed to $TOOLS_DIR/testssl.sh"
-    else
-        echo -e "${RED}Clone failed. Check your internet connection.${RESET}"
-    fi
-    press_enter_to_continue
+audit_ui_install() {
+    tui_screen "Install testssl.sh" "Third-party tool by the testssl.sh project (GPLv2), fetched from GitHub."
+    ui_row "Source" "$TESTSSL_REPO"; echo
+    ui_row "Version" "$TESTSSL_TAG (pinned tag)"; echo
+    ui_row "Target" "$(ui_pathfit "$TOOLS_DIR/testssl.sh")"; echo
+    echo
+    ui_confirm "Download and install?" y || return 0
+    ui_spinner_start "Downloading testssl.sh ${TESTSSL_TAG}${G_ELLIPSIS}"
+    audit_install_testssl; local rc=$?
+    ui_spinner_stop
+    if (( rc == 0 )); then ui_ok "testssl.sh ${TESTSSL_TAG} installed."; else ui_err "$(ui_safe "$ENC_ERR")"; fi
+    ui_pause
 }

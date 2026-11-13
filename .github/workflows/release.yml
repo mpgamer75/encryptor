@@ -1,0 +1,58 @@
+name: Release
+
+# Publishing: push a tag such as v3.0.0. The job runs the tests, builds the
+# artifacts with build_release.sh and publishes a GitHub release with a
+# SHA256SUMS file.
+#
+# Dry run: "Run workflow" from the Actions tab builds the same artifacts from
+# any branch and attaches them to the run, without publishing anything.
+# CI also runs build_release.sh on every push.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds and tests with a read-only token that is not left on disk.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build artifacts (tag must match the program version)
+        if: github.ref_type == 'tag'
+        run: ./build_release.sh "$GITHUB_REF_NAME"
+      - name: Build artifacts (dry run)
+        if: github.ref_type != 'tag'
+        run: ./build_release.sh
+      - name: Attach artifacts to the workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: encryptor-release
+          path: dist/
+          if-no-files-found: error
+
+  # Only this job can write to the repository, only for tags, and it runs no
+  # project code: it downloads the artifacts built above and publishes them.
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: encryptor-release
+          path: dist
+      - name: Verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Encryptor $GITHUB_REF_NAME" --generate-notes

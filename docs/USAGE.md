@@ -1,562 +1,350 @@
-# 📚 Encryptor Usage Guide
+# Encryptor usage guide
 
-A comprehensive guide to using Encryptor for secure file encryption and decryption.
-
-## Table of Contents
-
-- [Quick Start](#quick-start)
-- [Installation](#installation)
-- [Basic Usage](#basic-usage)
-- [Interactive Mode](#interactive-mode)
-- [Command Line Options](#command-line-options)
-- [Encryption Examples](#encryption-examples)
-- [Decryption Examples](#decryption-examples)
-- [File Management](#file-management)
-- [Security Guidelines](#security-guidelines)
+- [Interactive UI](#interactive-ui)
+- [Command line](#command-line)
+- [Passwords and other secrets](#passwords-and-other-secrets)
+- [Certificate recipients](#certificate-recipients)
+- [Certificates and keys](#certificates-and-keys)
+- [Inspect and verify](#inspect-and-verify)
+- [Audit and monitoring](#audit-and-monitoring)
+- [Legacy 2.x files](#legacy-2x-files)
+- [JSON output](#json-output)
+- [Exit codes](#exit-codes)
+- [Environment and files](#environment-and-files)
 - [Troubleshooting](#troubleshooting)
-- [Advanced Usage](#advanced-usage)
-- [Integration Examples](#integration-examples)
 
-## Quick Start
+## Interactive UI
+
+Run `encryptor` with no arguments in a terminal.
+
+| Key | Action |
+|---|---|
+| `↑` `↓` / `j` `k` | Move |
+| `Enter` / `→` | Select |
+| `q` / `Esc` / `←` | Back |
+| letter or digit shown next to an item | Jump straight to it |
+| `PgUp` `PgDn` `Home` `End` | Scroll long lists |
+| typing (file browser) | Filter the list; `Esc` clears the filter |
+
+**Encrypt** walks through four steps: pick a file (browse, filter, or *Type a
+path* with TAB completion) → choose password or certificate recipients →
+enter the secret → result. Leave the password prompt empty to have a strong
+one generated and shown once. A strength meter warns about weak passwords.
+At the end you may securely delete the original; the encrypted copy is
+verified first.
+
+**Decrypt** detects the format, cipher and key type from the file. For
+recipient files it finds your matching private key in the store
+automatically. You get three attempts at the password.
+
+**Inspect & verify** shows what a file is and who can open it, and can check
+its integrity without writing plaintext.
+
+The UI uses the terminal's alternate screen, so your scrollback is restored
+when you quit. `Ctrl-C` exits cleanly at any point.
+
+Without a terminal (piped input) the menu refuses to start and points to the
+command line. For scripted UI tests set `ENCRYPTOR_ALLOW_PIPED_UI=1`: menus
+then become numbered prompts read from standard input.
+
+## Command line
+
+```
+encryptor encrypt [options] FILE...
+encryptor decrypt [options] FILE...
+encryptor inspect [--json] FILE
+encryptor verify  [options] FILE
+encryptor certs   [--json] [--warn-days N]
+encryptor audit   [--json]
+encryptor selftest
+encryptor passgen [LENGTH]
+encryptor completion bash|zsh
+encryptor help | version
+```
+
+### Encrypt
 
 ```bash
-# Install Encryptor
-curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
-
-# Launch interactive mode
-encryptor
-
-# Show help
-encryptor --help
-
-# Show version
-encryptor --version
+encryptor encrypt notes.txt                      # → notes.txt.enc, password prompted twice
+encryptor encrypt -p pass.txt a.txt b.txt        # several files, same password
+encryptor encrypt -p pass.txt -o out.enc in.dat  # explicit output
+encryptor encrypt -a chacha20 -p pass.txt in.dat # another cipher
+encryptor encrypt --kdf pbkdf2 -p pass.txt in.dat # NIST-approved KDF instead of scrypt
+encryptor encrypt -p pass.txt --shred in.dat     # verify the copy, then delete the original
+encryptor encrypt -r bob.pem -k bob.key --shred in.dat   # with recipients, --key is needed to verify
 ```
 
-## Installation
-
-### Automatic Installation (Recommended)
+- Password-protected files use **scrypt** (memory-hard) by default. `--kdf pbkdf2`
+  (or `ENCRYPTOR_KDF=pbkdf2`) selects PBKDF2-HMAC-SHA256 with 600,000 iterations;
+  `--iter N` sets that count and implies PBKDF2. Decryption needs no option: the
+  file records what was used.
+- An existing output is never overwritten unless `--force` is given (exit 5).
+- Output files are created with mode 0600.
+- Input and output may not be the same file (checked by identity, not by
+  spelling), and the output may not be a directory.
+- A directory as input is refused with the `tar` one-liner to use instead:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
+tar cz project/ | encryptor encrypt -p pass.txt -o project.tgz.enc -
 ```
 
-The installer will:
-- ✅ Check system requirements (Bash, OpenSSL)
-- ✅ Detect your shell (Zsh, Bash, Fish, etc.)
-- ✅ Download and install Encryptor
-- ✅ Configure PATH automatically
-- ✅ Test the installation
-
-### Manual Installation
+### Decrypt
 
 ```bash
-# Download the script
-wget https://raw.githubusercontent.com/mpgamer75/encryptor/main/encryptor.sh
-
-# Make executable and install
-chmod +x encryptor.sh
-sudo mv encryptor.sh /usr/local/bin/encryptor
-
-# Or install locally
-mkdir -p ~/.local/bin
-mv encryptor.sh ~/.local/bin/encryptor
-export PATH="$HOME/.local/bin:$PATH"
+encryptor decrypt notes.txt.enc                  # → notes.txt
+encryptor decrypt -p pass.txt -o - x.enc | less  # to standard output
+cat x.enc | encryptor decrypt -p pass.txt -      # from standard input
 ```
 
-### System Requirements
+The default output name strips `.enc` (or appends `.dec` if there is no such
+suffix). The file is read once; the output appears only if the authentication
+tag over the bytes that were decrypted is correct.
 
-- **Bash**: 4.0 or higher
-- **OpenSSL**: 1.1.0 or higher
-- **Operating System**: Linux, macOS, or WSL
-- **Storage**: Minimal (< 1MB)
+### Streams
 
-## Basic Usage
+`-` as FILE reads standard input; `-o -` writes to standard output. Bytes
+written to a pipe cannot be taken back, so in those cases the ciphertext is
+first staged in a private temporary directory and verified there (set `TMPDIR`
+if `/tmp` is too small for the file).
 
-Encryptor operates in **interactive mode** by default, providing a user-friendly menu-driven interface.
+## Passwords and other secrets
+
+Secrets are never accepted as command-line arguments. Sources, in order of
+precedence:
+
+| Option | Source |
+|---|---|
+| `-p`, `--pass-file FILE` | First line of FILE. A warning is printed if the file is readable by others. |
+| `--pass-env VAR` | Environment variable VAR (removed from the environment before any helper process starts). |
+| `--pass-stdin` | First line of standard input (not combinable with `-` as input). |
+| *(none)* | Prompt on the terminal, without echo. |
+
+With no source and no terminal the command fails with exit 2 rather than
+hanging. Passwords must be a single line of at most 1000 bytes (anything that OpenSSL
+would silently cut is refused); from a password file the first line is used and a
+trailing carriage return is removed.
 
 ```bash
-# Launch Encryptor
-encryptor
+encryptor passgen          # 24 random characters, ~142 bits
+encryptor passgen 40 > pass.txt && chmod 600 pass.txt
 ```
 
-You'll see the main menu:
-```
-🏠 Main Menu
-─────────────
-1) List files in current directory
-2) Encrypt a file 🔐
-3) Decrypt a file 🔓
-h) Help manual 📖
-v) Show version
-q) Quit
-```
+## Certificate recipients
 
-## Interactive Mode
-
-### Main Menu Navigation
-
-| Option | Action | Description |
-|--------|--------|-------------|
-| `1` | List Files | Show all files in current directory with icons and sizes |
-| `2` | Encrypt | Start the file encryption workflow |
-| `3` | Decrypt | Start the file decryption workflow |
-| `h` | Help | Display algorithm explanations and security info |
-| `v` | Version | Show Encryptor version and build information |
-| `q` | Quit | Exit Encryptor |
-
-### File Listing
-
-When you select option `1`, Encryptor displays files with visual indicators:
-
-```
-📁 Files in current directory:
-
-  📝 document.txt (2.3K)
-  🖼️  photo.jpg (1.2M)
-  📋 report.pdf (856K)
-  🔒 secret.txt.enc (2.4K)
-  📦 archive.zip (15M)
-```
-
-**File Icons:**
-- 📄 Generic files
-- 📝 Text files (.txt, .md)
-- 📋 PDF documents
-- 🖼️ Images (.jpg, .png, .gif)
-- 🎬 Videos (.mp4, .avi, .mov)
-- 🎵 Audio (.mp3, .wav, .flac)
-- 📦 Archives (.zip, .tar, .gz)
-- 🔒 Encrypted files (.enc)
-
-## Command Line Options
+Encrypt for the holders of X.509 certificates instead of sharing a password:
 
 ```bash
-# Show version information
-encryptor --version
-encryptor -v
-
-# Display help message
-encryptor --help
-encryptor -h
-
-# Interactive mode (default)
-encryptor
+encryptor encrypt -r alice.pem -r bob.pem contract.docx
 ```
 
-## Encryption Examples
-
-### Example 1: Basic AES-256 Encryption
+Each recipient decrypts with their own private key:
 
 ```bash
-encryptor
-# Select: 2) Encrypt a file
-# Enter filename: document.txt
-# Choose algorithm: 1) AES-256 (Recommended)
-# Enter password: [your secure password]
-# Result: document.txt.enc created
+encryptor decrypt -k alice.key contract.docx.enc
+encryptor decrypt -k alice.key --key-pass-file kp.txt contract.docx.enc   # encrypted key
+encryptor decrypt -k alice.key -c alice.pem contract.docx.enc             # optional: name the certificate
 ```
 
-**What happens:**
-- Original file: `document.txt`
-- Encrypted file: `document.txt.enc`
-- Algorithm: AES-256-CBC with PBKDF2
-- Password protection: Your chosen password
+RSA and EC (P-256/P-384) certificates are supported. Expired certificates are
+refused. A certificate whose `keyUsage` forbids key encipherment/agreement
+(for example a CA certificate) cannot be a recipient.
 
-### Example 2: RSA Encryption (Small Files)
+Recipient mode proves the file was not modified, not who created it.
+
+`--shred` with recipients requires `--key` (one recipient's private key), so
+that the encrypted file can be opened and verified before the original is
+deleted.
+
+## Certificates and keys
+
+All objects live in `~/.config/encryptor/certs/` as `NAME.pem` (certificate),
+`NAME.key` (private key, mode 0400), `NAME.csr`, `NAME.p12`. The interactive
+menu **Certificates & keys** offers:
+
+1. **Quick identity** — a key and a self-signed certificate (825 days) with
+   the right extensions to receive encrypted files. Send the `.pem` to your
+   correspondents and tell them its SHA-256 fingerprint over another channel.
+2. **Import a recipient certificate** — shows the subject and fingerprint and
+   asks for confirmation before adding it to the store.
+3. **Dashboard** — certificates with days until expiry, key type and whether
+   you hold the private key; private keys with mode and passphrase protection.
+4. **Inspect** — details plus findings (key size, signature algorithm,
+   validity), optionally the full OpenSSL dump.
+5. **Create a root CA** — `CA:TRUE, pathlen:0`, `keyCertSign, cRLSign`.
+6. **Create key + CSR.**
+7. **Sign a CSR** with a profile:
+   - *identity*: key encipherment/agreement, e-mail protection, client auth
+   - *server*: `serverAuth`; at least one DNS name or IP is required (SAN)
+   - *client*: `clientAuth`
+   Serial numbers are random 128-bit values.
+8. **Check** — does a key belong to a certificate (works for RSA and EC), and
+   does the certificate chain to a CA in the store.
+9. **Export to PKCS#12** — AES-256-CBC with PBKDF2 and a SHA-256 MAC.
+
+Key types: ECDSA P-256 (default) and P-384, RSA 3072 and 4096. When creating
+a key you are asked whether to protect it with a passphrase (recommended):
+the key file is then encrypted with AES-256 under PBKDF2-HMAC-SHA256 at
+600,000 iterations.
+
+Before a CSR is signed, its subject and key type are shown and must be
+confirmed. A CA that has expired or whose key usage does not allow signing is
+refused, and a certificate cannot be issued for longer than its CA remains
+valid.
+
+## Inspect and verify
 
 ```bash
-encryptor
-# Select: 2) Encrypt a file
-# Enter filename: password.txt
-# Choose algorithm: 2) RSA (Small files only)
-# Result: password.txt.enc, password.txt.key, password.txt.pub created
+$ encryptor inspect contract.docx.enc
+File:        contract.docx.enc (48.3 KiB)
+Format:      ENCRYPTOR/3 (encrypt-then-MAC with HMAC-SHA256)
+Verified:    no — inspect only reads the header; run "encryptor verify" to check the tag
+Cipher:      AES-256-CTR + HMAC-SHA256
+Key:         2 certificate recipient(s) listed in the header, CMS key wrap
+  recipient: sha256:7a38bc15…
+  recipient: sha256:b0f274d0…
+Payload:     48.0 KiB
+
+$ encryptor verify -p pass.txt backup.enc && echo intact
 ```
 
-**Generated files:**
-- `password.txt.enc` - Encrypted file
-- `password.txt.key` - RSA private key (keep secret!)
-- `password.txt.pub` - RSA public key (can share)
+`inspect` needs no secret and proves nothing about the content: it reads the
+header (its JSON says `"verified":false`). `verify` needs the password or key and exits 3 on
+any mismatch; it never writes plaintext, which makes it suitable for checking
+backups.
 
-⚠️ **Note**: RSA is limited to files smaller than ~200 bytes.
-
-### Example 3: Maximum Security (Hybrid AES+RSA)
+## Audit and monitoring
 
 ```bash
-encryptor
-# Select: 2) Encrypt a file
-# Enter filename: confidential.pdf
-# Choose algorithm: 3) Hybrid AES+RSA (Maximum security)
-# Result: Multiple files created for maximum security
+encryptor audit            # human-readable, with a score
+encryptor audit --json     # for CI; exit 1 if any check fails
+encryptor certs --warn-days 45 --json   # exit 1 if a certificate expires within 45 days
+encryptor selftest         # known-answer tests against the installed OpenSSL
 ```
 
-**Generated files:**
-- `confidential.pdf.enc` - AES-encrypted file
-- `confidential.pdf.enc.key.enc` - RSA-encrypted AES key
-- `confidential.pdf.key` - RSA private key
+The audit checks: OpenSSL and Bash versions, the cryptographic self-test,
+cipher availability, which password KDF new files get, permissions of the state directory,
+private keys and the log, passphrase protection of keys, certificate expiry
+and strength, stale temporary directories, legacy unauthenticated files in the
+current directory, and core-dump settings.
 
-### Example 4: Legacy 3DES Encryption
+The interactive audit menu can also run a remote TLS scan with
+[testssl.sh](https://testssl.sh) (a pinned release is downloaded on request).
+Only host names, IP addresses and `host:port` are accepted as targets. Scan
+only systems you are authorised to test.
+
+Cron example:
+
+```cron
+0 7 * * 1  encryptor certs --warn-days 30 --json > /var/log/encryptor-certs.json || mail -s "certificates expiring" ops@example.com < /var/log/encryptor-certs.json
+```
+
+## Legacy 2.x files
+
+Files written by Encryptor 2.0/2.1 are recognised, but they carry no
+authentication tag: nothing can tell whether such a file was modified or
+replaced. They are therefore refused (exit 6) unless you ask for them
+explicitly with `--legacy`, and the warning cannot be silenced:
 
 ```bash
-encryptor
-# Select: 2) Encrypt a file
-# Enter filename: legacy_data.txt
-# Choose algorithm: 4) 3DES (Legacy)
-# Enter password: [your secure password]
-# Result: legacy_data.txt.enc created
+encryptor decrypt --legacy -p pass.txt old.enc                                   # 2.1, aes-256-cbc
+encryptor decrypt --legacy -p pass.txt -a chacha20 old.enc                       # 2.1, another cipher
+encryptor decrypt --legacy -p pass.txt -a aes-256-ctr --legacy-iter 100000 old.enc   # written by 2.0
+encryptor decrypt --legacy -k my.key -c my.pem old-smime.enc                     # 2.x S/MIME
 ```
 
-## Decryption Examples
+Use `--legacy` only for files you created yourself or whose origin you trust.
 
-### Example 1: AES-256 Decryption
+The cipher was not stored in 2.x files, so it has to be supplied (default
+`aes-256-cbc`). To migrate, decrypt and encrypt again; `encryptor audit`
+reports legacy files in the current directory.
+
+## JSON output
+
+With `--json`, one object per processed file is written to standard output
+(to standard error when the data itself goes to standard output):
+
+```json
+{"status":"success","operation":"encrypt","input":"db.sql","output":"db.sql.enc","format":"encryptor/3","mode":"password","algo":"aes-256-ctr","kdf":"scrypt","bytes_in":1048576,"bytes_out":1048929,"ms":412}
+{"status":"success","operation":"decrypt","input":"db.sql.enc","output":"db.sql","format":"encryptor/3","mode":"password","algo":"aes-256-ctr","verified":true,"bytes_in":1048929,"bytes_out":1048576,"ms":398}
+{"status":"error","operation":"decrypt","input":"db.sql.enc","code":3,"error":"Authentication failed: wrong password, or the file has been modified or corrupted."}
+```
+
+Strings are escaped according to RFC 8259, including file names containing
+quotes, backslashes or newlines. The exit status is the first non-zero code
+encountered.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Failure |
+| 2 | Usage error (bad option, no password source, unknown cipher) |
+| 3 | Wrong password or key, or the data failed authentication |
+| 4 | Input not found or unreadable |
+| 5 | Output exists (without `--force`) or cannot be written |
+| 6 | Unsupported or unrecognised format |
+| 130 | Interrupted |
+
+## Environment and files
+
+| Variable | Effect |
+|---|---|
+| `ENCRYPTOR_CONFIG_DIR` | State directory (default `$XDG_CONFIG_HOME/encryptor`, i.e. `~/.config/encryptor`) |
+| `ENCRYPTOR_KDF` | Password KDF for new files: `scrypt`, `pbkdf2` or `auto` (default: scrypt when the OpenSSL build supports it) |
+| `ENCRYPTOR_PBKDF2_ITER` | Default PBKDF2 iteration count |
+| `ENCRYPTOR_NO_LOG=1` | Disable the operation log |
+| `NO_COLOR` | Disable colors (`--no-color` does the same) |
+| `ENCRYPTOR_ASCII=1` | Force ASCII glyphs in the UI |
+| `TMPDIR` | Where the private temporary directory is created |
+
+| Path | Content |
+|---|---|
+| `~/.config/encryptor/certs/` | Certificates, private keys, CSRs, PKCS#12 bundles (directory mode 0700) |
+| `~/.config/encryptor/encryptor.log` | Operation log, mode 0600, rotated at 1 MiB. Operations and file names only. |
+| `~/.config/encryptor/tools/` | testssl.sh, if installed from the audit menu |
+
+Shell completion:
 
 ```bash
-encryptor
-# Select: 3) Decrypt a file
-# Enter filename: document.txt.enc
-# Choose algorithm: 1) AES-256
-# Enter password: [same password used for encryption]
-# Result: document.txt.dec created
+source <(encryptor completion bash)      # add to ~/.bashrc
+source <(encryptor completion zsh)       # add to ~/.zshrc
 ```
-
-### Example 2: RSA Decryption
-
-```bash
-encryptor
-# Select: 3) Decrypt a file
-# Enter filename: password.txt.enc
-# Choose algorithm: 2) RSA
-# Enter private key filename: password.txt.key
-# Result: password.txt.dec created
-```
-
-### Example 3: Hybrid AES+RSA Decryption
-
-```bash
-encryptor
-# Select: 3) Decrypt a file
-# Enter filename: confidential.pdf.enc
-# Choose algorithm: 3) Hybrid AES+RSA
-# Enter encrypted key filename: confidential.pdf.enc.key.enc
-# Enter private key filename: confidential.pdf.key
-# Result: confidential.pdf.dec created
-```
-
-## File Management
-
-### Automatic File Naming
-
-Encryptor automatically handles file naming to prevent overwrites:
-
-```bash
-# Original file
-document.txt
-
-# First encryption
-document.txt.enc
-
-# If document.txt.enc exists, creates:
-document.txt.enc.1
-
-# If document.txt.enc.1 exists, creates:
-document.txt.enc.2
-```
-
-### File Extensions
-
-| Extension | Description |
-|-----------|-------------|
-| `.enc` | Encrypted file |
-| `.dec` | Decrypted file |
-| `.key` | RSA private key |
-| `.pub` | RSA public key |
-| `.key.enc` | RSA-encrypted AES key |
-
-### Secure File Handling
-
-Encryptor follows security best practices:
-
-- **Temporary files**: Created in `/tmp/encryptor_$$` with secure permissions
-- **Automatic cleanup**: All temporary files removed on exit
-- **Original files**: Never modified during encryption
-- **Memory protection**: No plaintext passwords stored in variables
-
-## Security Guidelines
-
-### Password Best Practices
-
-✅ **Do:**
-- Use passwords with 12+ characters
-- Include uppercase, lowercase, numbers, and symbols
-- Use unique passwords for each file
-- Use a password manager
-
-❌ **Don't:**
-- Reuse passwords across multiple files
-- Use dictionary words or personal information
-- Store passwords in plain text files
-- Share passwords over insecure channels
-
-### Key Management (RSA/Hybrid)
-
-✅ **Private Keys:**
-- Store in secure location with restricted permissions
-- Create secure backups
-- Never share private keys
-- Use strong passphrases for key files
-
-✅ **Public Keys:**
-- Can be shared freely
-- Verify authenticity before use
-- Keep copies for reference
-
-### File Security
-
-✅ **Best Practices:**
-- Securely delete original files after encryption
-- Verify encrypted files before deleting originals
-- Test decryption before relying on encrypted files
-- Keep secure backups of important encrypted data
 
 ## Troubleshooting
 
-### Common Issues
+**"Authentication failed: wrong password, or the file has been modified or corrupted."**
+The tag did not verify. By design the tool cannot tell these cases apart.
+Check the password (keyboard layout, trailing spaces in a password file), and
+compare the file's size or checksum with the original.
 
-#### "Command not found: encryptor"
+**"… is a legacy Encryptor 2.x file with NO authentication."**
+See [Legacy 2.x files](#legacy-2x-files): add `--legacy` if you trust the file.
 
-**Solution:**
-```bash
-# Check if installed
-ls -la ~/.local/bin/encryptor
+**"Could not unwrap the file key."**
+The private key is not one of the recipients, or its passphrase is wrong.
+`encryptor inspect FILE` lists recipient fingerprints; compare with
+`openssl x509 -in my.pem -noout -fingerprint -sha256`.
 
-# Add to PATH temporarily
-export PATH="$HOME/.local/bin:$PATH"
+**"Could not encrypt the file key for the recipient certificate(s)."**
+The certificate does not permit encryption (for example `keyUsage` is limited
+to signing, or it is a CA certificate). Use an identity certificate.
 
-# Add to shell config permanently
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
+**"This file uses scrypt, which this OpenSSL build does not support."**
+The file was written with the default KDF and is being opened with LibreSSL
+or a very old OpenSSL. Decrypt it with OpenSSL 1.1.1+ / 3.x, or create files
+for such systems with `--kdf pbkdf2`.
 
-#### "OpenSSL not found"
+**"Algorithm … is not available in this OpenSSL build."**
+Some builds (LibreSSL, minimal distributions) omit ARIA or Camellia. Use
+`aes-256-ctr`.
 
-**Solution:**
-```bash
-# Ubuntu/Debian
-sudo apt update && sudo apt install openssl
+**The UI shows `?` or misaligned boxes.**
+The terminal is not in a UTF-8 locale. Set `LANG` to a UTF-8 locale or use
+`ENCRYPTOR_ASCII=1`.
 
-# CentOS/RHEL
-sudo yum install openssl
+**Bash too old on macOS.**
+`brew install bash openssl@3` and make sure both come first in `PATH`.
 
-# macOS
-brew install openssl
-```
-
-#### "Permission denied"
-
-**Solution:**
-```bash
-# Make script executable
-chmod +x ~/.local/bin/encryptor
-
-# Check file permissions
-ls -la ~/.local/bin/encryptor
-```
-
-#### "File too large for RSA"
-
-RSA encryption is limited to ~200 bytes. **Solutions:**
-
-1. **Use AES-256** for larger files
-2. **Use Hybrid AES+RSA** for maximum security with large files
-3. **Split large files** into smaller chunks (not recommended)
-
-#### "Wrong password" error
-
-**Solutions:**
-1. Verify you're using the correct password
-2. Check if file was encrypted with different algorithm
-3. Ensure file hasn't been corrupted
-4. Try decryption with different algorithm
-
-### Debug Mode
-
-For troubleshooting, you can enable debug output:
-
-```bash
-# Run with debug information
-bash -x ~/.local/bin/encryptor
-```
-
-### Log Files
-
-Encryptor doesn't create persistent logs for security reasons, but you can capture output:
-
-```bash
-# Capture session output
-encryptor 2>&1 | tee encryptor_session.log
-
-# Remember to securely delete logs containing sensitive information
-shred -u encryptor_session.log
-```
-
-## Advanced Usage
-
-### Batch Operations
-
-While Encryptor doesn't have built-in batch operations, you can script them:
-
-```bash
-# Encrypt multiple files with AES-256
-for file in *.txt; do
-    echo "Encrypting $file..."
-    echo -e "2\n$file\n1\nmypassword" | encryptor
-done
-```
-
-⚠️ **Warning**: This method exposes passwords in command history. Use with caution.
-
-### Integration with Other Tools
-
-#### Git Hooks
-
-```bash
-#!/bin/bash
-# Pre-commit hook to encrypt sensitive files
-encryptor << EOF
-2
-secrets.txt
-1
-$ENCRYPTION_PASSWORD
-q
-EOF
-```
-
-#### Backup Scripts
-
-```bash
-#!/bin/bash
-# Automated backup with encryption
-tar czf backup.tar.gz /important/data/
-encryptor << EOF
-2
-backup.tar.gz
-3
-q
-EOF
-rm backup.tar.gz  # Remove unencrypted backup
-```
-
-### Custom Workflows
-
-#### Secure File Sharing
-
-1. **Sender:**
-   ```bash
-   # Encrypt with hybrid method
-   encryptor  # Choose file, select Hybrid AES+RSA
-   
-   # Share: encrypted_file.enc + encrypted_key.key.enc
-   # Keep: private.key (secret)
-   ```
-
-2. **Receiver:**
-   ```bash
-   # Receive: encrypted_file.enc + encrypted_key.key.enc + private.key
-   encryptor  # Decrypt with Hybrid method
-   ```
-
-## Integration Examples
-
-### Cron Jobs
-
-```bash
-# Daily backup encryption
-0 2 * * * /home/user/backup_encrypt.sh
-
-# backup_encrypt.sh content:
-#!/bin/bash
-cd /home/user/backups
-for file in backup_*.sql; do
-    if [[ ! -f "${file}.enc" ]]; then
-        echo "backup_password" | encryptor << EOF
-2
-$file
-1
-backup_password
-q
-EOF
-    fi
-done
-```
-
-### CI/CD Pipelines
-
-```bash
-# GitHub Actions example
-- name: Encrypt sensitive files
-  run: |
-    echo "$ENCRYPTION_PASSWORD" | encryptor << EOF
-    2
-    config/secrets.json
-    1
-    $ENCRYPTION_PASSWORD
-    q
-    EOF
-```
-
-### Shell Aliases
-
-Add to your shell configuration:
-
-```bash
-# ~/.bashrc or ~/.zshrc
-alias encrypt='encryptor'
-alias enc-aes='echo -e "2\n\$1\n1\n" | encryptor'
-alias enc-hybrid='echo -e "2\n\$1\n3\n" | encryptor'
-
-# Usage:
-# enc-aes myfile.txt
-# enc-hybrid sensitive.pdf
-```
-
-## Performance Tips
-
-### Large Files
-
-- **Use AES-256 or Hybrid** for files > 1MB
-- **Avoid RSA** for files > 200 bytes
-- **Consider file compression** before encryption for better performance
-
-### System Resources
-
-- **RAM Usage**: Minimal (< 10MB during operation)
-- **CPU Usage**: Depends on algorithm (AES < Hybrid < RSA)
-- **Disk Space**: Encrypted files are slightly larger than originals
-
-### Optimization
-
-```bash
-# For maximum performance, ensure:
-# 1. SSD storage for temporary files
-# 2. Sufficient RAM (4GB+ recommended)
-# 3. Modern CPU with AES-NI support
-```
-
----
-
-## Getting Help
-
-- **Built-in Help**: Press `h` in the main menu
-- **Algorithm Guide**: See [ALGORITHMS.md](ALGORITHMS.md)
-- **Command Help**: Run `encryptor --help`
-- **GitHub Issues**: Report bugs and request features
-- **Security Concerns**: Follow responsible disclosure practices
-
-## Next Steps
-
-1. **Practice**: Try encrypting/decrypting test files
-2. **Security**: Review the [ALGORITHMS.md](ALGORITHMS.md) guide
-3. **Integration**: Incorporate into your security workflows
-4. **Contribute**: Help improve Encryptor on GitHub
-
-Remember: **Good security practices matter more than complex tools.** Use strong passwords, manage your keys securely, and always verify your encrypted files work before relying on them.
+**Lost password.**
+There is no recovery and no back door.

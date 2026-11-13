@@ -1,29 +1,24 @@
 Package: encryptor
-Version: 2.1.0-1
+Version: 3.0.0-1
 Architecture: all
 Maintainer: mpgamer75 <mpgamer75@github.com>
-Depends: openssl (>= 1.1.1), bash (>= 4.0)
-Recommends: curl, wget, git, coreutils, less
+Depends: bash (>= 4.4), openssl (>= 1.1.1), coreutils, findutils, sed, grep, gawk | mawk
+Recommends: less
+Suggests: git
 Section: utils
 Priority: optional
 Homepage: https://github.com/mpgamer75/encryptor
-Description: Advanced CLI encryption tool with AES-256-GCM, S/MIME, and PKI management
- Encryptor is an industry-grade command-line encryption tool built on OpenSSL.
- It provides authenticated encryption, full X.509 PKI management, and a rich
- interactive TUI — with zero dependencies beyond bash and openssl.
+Description: Authenticated file encryption and X.509 toolkit built on OpenSSL
+ Encryptor encrypts files with a password or for X.509 certificate holders,
+ using only Bash and the OpenSSL command line.
  .
- Security highlights in v2.1.0:
-  - AES-256-GCM as default (true AEAD — confidentiality AND integrity)
-  - Passwords never passed on command line (file descriptor pattern)
-  - PBKDF2-HMAC-SHA256 with 600,000 iterations (OWASP 2024)
-  - SHA-256 integrity sidecar files for tamper detection
- .
- Features:
-  - Symmetric: AES-256-GCM (default), AES-256-CBC/CTR, ChaCha20, Camellia, ARIA
-  - Asymmetric: S/MIME with X.509 certificates (AES-256-GCM key wrap)
-  - Full PKI: Root CA creation, CSR generation, signing, PKCS#12 export
-  - Security audit: 8 local checks with score + remote SSL/TLS scanning
-  - Batch/non-interactive mode with JSON output for CI/CD pipelines
-  - Interactive color-coded TUI with spinner and status bar
-  - Secure file deletion (3-pass shred)
-  - Cross-platform: Linux, macOS, WSL
+  - Self-describing ENCRYPTOR/3 container: cipher + HMAC-SHA256
+    (encrypt-then-MAC), verified before any plaintext is written
+  - Password mode: PBKDF2-HMAC-SHA256, 600,000 iterations
+  - Recipient mode: random file key wrapped with CMS (RSA-OAEP or ECDH),
+    multiple recipients
+  - Secrets are never placed in process arguments or written to disk
+  - Small PKI: identities, root CA, CSR, signing profiles with SANs, PKCS#12
+  - Certificate expiry report and local security audit with JSON output
+  - Interactive terminal UI and a scriptable command-line interface
+  - Reads files written by Encryptor 2.x

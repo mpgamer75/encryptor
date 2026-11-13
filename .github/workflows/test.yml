@@ -6,162 +6,158 @@ on:
   pull_request:
     branches: ["main", "master"]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # ── 1. Bash syntax check ─────────────────────────────────────────────────────
-  syntax:
-    name: Syntax Check (bash -n)
+  # ── 1. Static analysis ──────────────────────────────────────────────────────
+  lint:
+    name: Lint (bash -n, ShellCheck)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check Bash syntax
+      - name: Syntax check
         run: |
-          echo "Checking syntax..."
-          bash -n encryptor.sh
-          bash -n install.sh
-          bash -n uninstall.sh
-          bash -n build_deb.sh
-          for f in lib/*.sh; do bash -n "$f"; done
-          echo "✅ All scripts pass syntax check"
+          for f in encryptor.sh install.sh uninstall.sh build_deb.sh build_release.sh lib/*.sh tests/run.sh; do
+            bash -n "$f"
+          done
+      - name: ShellCheck (per file)
+        run: shellcheck -S warning encryptor.sh install.sh uninstall.sh build_deb.sh build_release.sh lib/*.sh tests/run.sh
+      - name: ShellCheck (whole program, catches unused/undefined cross-module names)
+        run: |
+          cat lib/core.sh lib/ui.sh lib/crypto.sh lib/certs.sh lib/audit.sh lib/tui.sh lib/cli.sh encryptor.sh > "$RUNNER_TEMP/program.sh"
+          shellcheck --norc -s bash -S warning "$RUNNER_TEMP/program.sh"
 
-  # ── 2. ShellCheck lint ───────────────────────────────────────────────────────
-  shellcheck:
-    name: ShellCheck Lint
+  # ── 2. Test suite (required) ────────────────────────────────────────────────
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest matters separately: recent Ubuntu ships uutils (Rust)
+        # coreutils, whose tools differ from GNU's in corner cases.
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions
+        run: bash --version | head -n 1 && openssl version && (tail --version | head -n 1)
+      - name: Run test suite
+        run: bash tests/run.sh
+
+  # ── 3. Compatibility (required: these are supported platforms) ───────────────
+  compat-openssl-111:
+    name: Compatibility — OpenSSL 1.1.1 (Ubuntu 20.04)
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
+    steps:
+      - name: Install tools
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssl ca-certificates git python3
+      - uses: actions/checkout@v4
+      - name: Versions
+        run: bash --version | head -n 1 && openssl version
+      - name: Run test suite
+        run: bash tests/run.sh
+
+  compat-macos:
+    name: Compatibility — macOS (Homebrew bash + OpenSSL 3)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install bash openssl@3
+      - name: Run test suite
+        run: |
+          export PATH="$(brew --prefix openssl@3)/bin:$(brew --prefix)/bin:$PATH"
+          bash --version | head -n 1 && openssl version
+          bash tests/run.sh
+
+  # ── 4. Packaging ────────────────────────────────────────────────────────────
+  package:
+    name: Debian package + installer
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install ShellCheck
-        run: sudo apt-get install -y shellcheck
-      - name: Run ShellCheck
+      - name: Build .deb
+        run: ./build_deb.sh
+      - name: Install the package and run the self-test
         run: |
-          shellcheck -S warning \
-            encryptor.sh \
-            install.sh \
-            uninstall.sh \
-            build_deb.sh \
-            lib/ui.sh \
-            lib/crypto.sh \
-            lib/certs.sh \
-            lib/audit.sh
-          echo "✅ ShellCheck passed"
+          sudo apt-get install -y ./encryptor_*.deb
+          test "$(command -v encryptor)" = /usr/bin/encryptor
+          encryptor version
+          encryptor selftest
+          man -w encryptor
+      - name: Installer into a custom prefix
+        run: |
+          ./install.sh --prefix "$RUNNER_TEMP/prefix"
+          "$RUNNER_TEMP/prefix/bin/encryptor" selftest
+          ./uninstall.sh --prefix "$RUNNER_TEMP/prefix" </dev/null
+          test ! -e "$RUNNER_TEMP/prefix/bin/encryptor"
 
-  # ── 3. Functional smoke test ─────────────────────────────────────────────────
-  smoke-test:
-    name: Smoke Tests
+  # ── 5. Release pipeline dry run (same script the Release workflow uses) ──────
+  release-dry-run:
+    name: Release artifacts (dry run)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: sudo apt-get install -y openssl coreutils
-
-      - name: Prepare test environment
+      - name: Build release artifacts
+        run: ./build_release.sh
+      - name: Check artifacts
         run: |
-          chmod +x encryptor.sh
-          # Point encryptor config to a temp location so tests are isolated
-          export ENCRYPTOR_CONFIG_DIR="$(mktemp -d)"
-          echo "ENCRYPTOR_CONFIG_DIR=$ENCRYPTOR_CONFIG_DIR" >> "$GITHUB_ENV"
+          cd dist
+          sha256sum -c SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 2
+          dpkg-deb --info encryptor_*.deb | grep -q '^ Package: encryptor$'
+          tar -tzf encryptor-*.tar.gz | grep -q '/lib/crypto.sh$'
 
-      - name: Test --version
-        run: ./encryptor.sh --version | grep -E "^Encryptor v[0-9]"
-
-      - name: Test --help
-        run: ./encryptor.sh --help | grep -i "usage"
-
-      - name: Test AES-256-CBC encrypt + decrypt (batch mode, default)
-        run: |
-          echo "Hello Encryptor CI $(date)" > /tmp/test_plain.txt
-          printf 'SuperSecretTestPassword123!' > /tmp/test.pass
-
-          ./encryptor.sh --encrypt /tmp/test_plain.txt \
-            --algo aes-256-cbc \
-            --pass-file /tmp/test.pass \
-            --output /tmp/test_plain.txt.enc
-
-          ./encryptor.sh --decrypt /tmp/test_plain.txt.enc \
-            --algo aes-256-cbc \
-            --pass-file /tmp/test.pass \
-            --output /tmp/test_plain_recovered.txt
-
-          diff /tmp/test_plain.txt /tmp/test_plain_recovered.txt
-          echo "✅ AES-256-CBC round-trip OK"
-
-      - name: Test SHA-256 sidecar file creation
-        run: |
-          [[ -f /tmp/test_plain.txt.enc.sha256 ]] || { echo "❌ SHA-256 sidecar missing"; exit 1; }
-          sha256sum -c /tmp/test_plain.txt.enc.sha256 --status
-          echo "✅ SHA-256 integrity sidecar OK"
-
-      - name: Test AES-256-CBC encrypt + decrypt (batch mode)
-        run: |
-          echo "CBC test payload" > /tmp/test_cbc.txt
-          printf 'CBCTestPassword' > /tmp/test_cbc.pass
-
-          ./encryptor.sh --encrypt /tmp/test_cbc.txt \
-            --algo aes-256-cbc \
-            --pass-file /tmp/test_cbc.pass \
-            --output /tmp/test_cbc.txt.enc
-
-          ./encryptor.sh --decrypt /tmp/test_cbc.txt.enc \
-            --algo aes-256-cbc \
-            --pass-file /tmp/test_cbc.pass \
-            --output /tmp/test_cbc_recovered.txt
-
-          diff /tmp/test_cbc.txt /tmp/test_cbc_recovered.txt
-          echo "✅ AES-256-CBC round-trip OK"
-
-      - name: Test JSON output mode
-        run: |
-          echo "json test" > /tmp/json_test.txt
-          printf 'JsonPassword' > /tmp/json_test.pass
-
-          result=$(./encryptor.sh --encrypt /tmp/json_test.txt \
-            --algo aes-256-cbc \
-            --pass-file /tmp/json_test.pass \
-            --json)
-
-          echo "$result" | grep '"status":"success"'
-          echo "✅ JSON output mode OK"
-
-      - name: Verify passwords are NOT in process args
-        run: |
-          # Start an encryption in background, check /proc, kill it
-          echo "Process argument test data" > /tmp/proc_test.txt
-          printf 'ProcTestPassword' > /tmp/proc_test.pass
-
-          # Large file so process stays alive long enough to check
-          dd if=/dev/urandom of=/tmp/proc_test_large.txt bs=1M count=50 2>/dev/null
-
-          ./encryptor.sh --encrypt /tmp/proc_test_large.txt \
-            --algo aes-256-cbc \
-            --pass-file /tmp/proc_test.pass &
-          ENC_PID=$!
-
-          sleep 0.5
-
-          # Check that the password does NOT appear in the process cmdline
-          if [[ -f "/proc/$ENC_PID/cmdline" ]]; then
-            if grep -qF "ProcTestPassword" "/proc/$ENC_PID/cmdline" 2>/dev/null; then
-              echo "❌ SECURITY FAILURE: password found in process args!" >&2
-              kill $ENC_PID 2>/dev/null
-              exit 1
-            fi
-            echo "✅ Password NOT in process args (cmdline clean)"
-          fi
-
-          wait $ENC_PID 2>/dev/null || true
-          echo "✅ Process arg security check passed"
-
-  # ── 4. Debian package build ───────────────────────────────────────────────────
-  deb-build:
-    name: Debian Package Build
+  # ── 6. Container image ───────────────────────────────────────────────────────
+  docker:
+    name: Docker image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install packaging tools
-        run: sudo apt-get install -y fakeroot dpkg-dev
-      - name: Build .deb package
+      - name: Build (the Dockerfile runs the self-test)
+        run: docker build -t encryptor:ci .
+      - name: Round trip on a mounted volume, as the invoking user
         run: |
-          chmod +x build_deb.sh
-          ./build_deb.sh
-          ls -lh encryptor_*.deb
-          dpkg --info encryptor_*.deb
-          echo "✅ .deb package built successfully"
+          mkdir vol
+          echo "container payload" > vol/a.txt
+          printf 'ci-container-passphrase\n' > vol/pass
+          chmod 600 vol/pass
+          run() { docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/vol:/data" encryptor:ci "$@"; }
+          run encrypt -q -p /data/pass a.txt
+          run decrypt -q -p /data/pass -o b.txt a.txt.enc
+          cmp vol/a.txt vol/b.txt
+          test "$(stat -c '%u %a' vol/a.txt.enc)" = "$(id -u) 600"
+          test "$(docker run --rm --entrypoint id encryptor:ci -un)" = encryptor
+      - name: Test suite inside the image (Alpine, busybox userland + coreutils)
+        run: docker run --rm -v "$PWD:/src:ro" --entrypoint bash encryptor:ci -c 'cd /tmp && bash /src/tests/run.sh'
+      - name: A file written in the container opens on the host
+        run: bash encryptor.sh decrypt -q -p vol/pass -o - vol/a.txt.enc | cmp - vol/a.txt
+
+  # ── 7. RPM package ───────────────────────────────────────────────────────────
+  rpm:
+    name: RPM package (Fedora)
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install build tools
+        run: dnf -y install rpm-build dnf-plugins-core tar gzip
+      - uses: actions/checkout@v4
+      - name: Build the RPM (runs the test suite in %check)
+        run: |
+          version="$(sed -n 's/^readonly ENCRYPTOR_VERSION="\(.*\)"$/\1/p' encryptor.sh)"
+          mkdir -p ~/rpmbuild/SOURCES
+          tar -czf ~/rpmbuild/SOURCES/encryptor-${version}.tar.gz --exclude=.git --transform "s,^\.,encryptor-${version}," .
+          dnf -y builddep encryptor.spec     # only what the spec declares in BuildRequires
+          rpmbuild -ba encryptor.spec
+      - name: Install and run
+        run: |
+          rpm -i --nosignature ~/rpmbuild/RPMS/noarch/encryptor-*.noarch.rpm
+          encryptor version
+          encryptor selftest
+          rpm -ql encryptor | grep -q '/usr/lib/encryptor/crypto.sh'

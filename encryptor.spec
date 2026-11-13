@@ -1,84 +1,78 @@
 Name:           encryptor
-Version:        2.1.0
+Version:        3.0.0
 Release:        1%{?dist}
-Summary:        Advanced CLI encryption tool with AES-256-GCM, S/MIME, and PKI management
+Summary:        Authenticated file encryption and X.509 toolkit built on OpenSSL
 
 License:        MIT
 URL:            https://github.com/mpgamer75/encryptor
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
-Requires:       bash >= 4.0
+# %%install generates the completion script and %%check runs the test suite.
+BuildRequires:  bash >= 4.4
+BuildRequires:  openssl >= 1.1.1
+BuildRequires:  coreutils
+BuildRequires:  findutils
+BuildRequires:  sed
+BuildRequires:  grep
+BuildRequires:  gawk
+BuildRequires:  tar
+BuildRequires:  gzip
+Requires:       bash >= 4.4
 Requires:       openssl >= 1.1.1
-Recommends:     git
+Requires:       coreutils
+Requires:       findutils
+Requires:       sed
+Requires:       grep
+Requires:       gawk
 Recommends:     less
-Recommends:     coreutils
+Suggests:       git
 
 %description
-Encryptor is an advanced command-line encryption tool built on OpenSSL.
+Encryptor encrypts files with a password or for X.509 certificate holders,
+using only Bash and the OpenSSL command line.
 
-Features:
-  - AES-256-GCM (default, true AEAD), AES-256-CBC/CTR, ChaCha20,
-    Camellia-256-CBC, ARIA-256-CBC symmetric encryption
-  - S/MIME asymmetric encryption using X.509 certificates
-  - PBKDF2-HMAC-SHA256 key derivation (600,000 iterations)
-  - SHA-256 integrity sidecar files for tamper detection
-  - Full X.509 PKI management: Root CA, CSR, signing, PKCS#12 export
-  - Security audit (local checks + optional remote SSL/TLS scan)
-  - Batch/non-interactive mode for CI/CD pipelines (--encrypt, --decrypt, --json)
-  - Interactive color-coded TUI
-  - Cross-platform: Linux, macOS, WSL
+ - Self-describing ENCRYPTOR/3 container: cipher + HMAC-SHA256
+   (encrypt-then-MAC), verified before any plaintext is written
+ - Password mode (PBKDF2-HMAC-SHA256) and certificate recipients (CMS key wrap)
+ - Secrets are never placed in process arguments or written to disk
+ - Small PKI, certificate expiry report, local security audit, JSON output
+ - Interactive terminal UI and a scriptable command-line interface
 
 %prep
 %setup -q
 
 %install
-# Main script
 install -Dm755 encryptor.sh %{buildroot}%{_bindir}/encryptor
+# noarch shell modules live under /usr/lib (not %%{_libdir}, which is lib64 on 64-bit).
+install -dm755 %{buildroot}%{_prefix}/lib/encryptor
+for m in core ui crypto certs audit tui cli; do
+    install -m644 lib/$m.sh %{buildroot}%{_prefix}/lib/encryptor/$m.sh
+done
+install -Dm644 man/encryptor.1 %{buildroot}%{_mandir}/man1/encryptor.1
+install -dm755 %{buildroot}%{_datadir}/bash-completion/completions
+bash encryptor.sh completion bash > %{buildroot}%{_datadir}/bash-completion/completions/encryptor
 
-# Library modules
-install -dm755 %{buildroot}%{_libdir}/encryptor
-install -Dm644 lib/ui.sh     %{buildroot}%{_libdir}/encryptor/ui.sh
-install -Dm644 lib/crypto.sh %{buildroot}%{_libdir}/encryptor/crypto.sh
-install -Dm644 lib/certs.sh  %{buildroot}%{_libdir}/encryptor/certs.sh
-install -Dm644 lib/audit.sh  %{buildroot}%{_libdir}/encryptor/audit.sh
-
-# Patch LIB_DIR to point to the installed location
-sed -i 's|LIB_DIR="$SCRIPT_DIR/lib"|LIB_DIR="%{_libdir}/encryptor"|' \
-    %{buildroot}%{_bindir}/encryptor
-
-# Documentation
-install -Dm644 README.md            %{buildroot}%{_docdir}/%{name}/README.md
-install -Dm644 CHANGELOG.md         %{buildroot}%{_docdir}/%{name}/CHANGELOG.md
-install -Dm644 docs/ALGORITHMS.md   %{buildroot}%{_docdir}/%{name}/ALGORITHMS.md
-install -Dm644 docs/USAGE.md        %{buildroot}%{_docdir}/%{name}/USAGE.md
-install -Dm644 LICENSE              %{buildroot}%{_docdir}/%{name}/LICENSE
-
-# Man page
-install -dm755 %{buildroot}%{_mandir}/man1
-gzip -c debian/encryptor.1 > %{buildroot}%{_mandir}/man1/encryptor.1.gz
+%check
+bash tests/run.sh
 
 %files
 %license LICENSE
-%doc %{_docdir}/%{name}/
+%doc README.md CHANGELOG.md SECURITY.md docs/USAGE.md docs/ALGORITHMS.md docs/FORMAT.md
 %{_bindir}/encryptor
-%{_libdir}/encryptor/
-%{_mandir}/man1/encryptor.1.gz
-
-%post
-# Update man database if available
-if command -v mandb >/dev/null 2>&1; then
-    mandb -q 2>/dev/null || true
-fi
-
-%postun
-# Update man database after removal
-if command -v mandb >/dev/null 2>&1; then
-    mandb -q 2>/dev/null || true
-fi
+%{_prefix}/lib/encryptor/
+%{_mandir}/man1/encryptor.1*
+%{_datadir}/bash-completion/completions/encryptor
 
 %changelog
-* Sat Mar 22 2026 mpgamer75 <mpgamer75@github.com> - 2.1.0-1
+* Fri Nov 13 2026 mpgamer75 <mpgamer75@github.com> - 3.0.0-1
+- New authenticated container format ENCRYPTOR/3 (encrypt-then-MAC)
+- Secrets passed to openssl over pipes; nothing on disk or in argv
+- Certificate recipients via CMS key wrap, multiple recipients
+- New command-line interface, terminal UI, PKI profiles, audit and test suite
+- Modules installed under /usr/lib/encryptor; no path patching
+
+* Sun Mar 22 2026 mpgamer75 <mpgamer75@github.com> - 2.1.0-1
 - Critical security fix: password no longer exposed in process args (ps aux)
 - Critical security fix: false AEAD claim corrected for CBC/CTR modes
 - Critical security fix: PKCS#12 export password leak fixed

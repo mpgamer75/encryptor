@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Base image of the container (OpenSSL security fixes arrive through it).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  # Actions used by the workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
