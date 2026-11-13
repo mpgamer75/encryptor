@@ -94,7 +94,8 @@ done
 # --- Locate the sources -------------------------------------------------------
 # A directory is used as a local source only when it is clearly a checkout the
 # invoking user controls: the complete file set is present, and neither the
-# directory nor lib/ is owned by someone else or writable by group/others.
+# directory nor lib/ is owned by someone else, writable by others, or writable
+# by a group other than the user's own.
 # This keeps "sudo bash /tmp/install.sh" from installing files another user
 # planted next to it. When the script is piped from the network there is no
 # script path at all. A pinned ref or checksum always forces a download.
@@ -103,14 +104,17 @@ WORK=""
 cleanup() { [[ -n "$WORK" && -d "$WORK" ]] && rm -rf -- "$WORK"; return 0; }
 trap cleanup EXIT
 
-dir_is_private() {      # owned by the current user (or root) and not group/world-writable
-    local d="$1" owner mode
+dir_is_private() {      # not modifiable by anyone but the current user (or root)
+    local d="$1" owner group mode
     owner=$(stat -c%u -- "$d" 2>/dev/null) || owner=$(stat -f%u -- "$d" 2>/dev/null) || return 1
+    group=$(stat -c%g -- "$d" 2>/dev/null) || group=$(stat -f%g -- "$d" 2>/dev/null) || return 1
     mode=$(stat -c%a -- "$d" 2>/dev/null) || mode=$(stat -f%Lp -- "$d" 2>/dev/null) || return 1
     [[ "$owner" == "${EUID:-$(id -u)}" || "$owner" == "0" ]] || return 1
     mode="${mode: -3}"
-    case "${mode:1:1}" in 2|3|6|7) return 1 ;; esac
+    # Writable by others: never. Writable by group: only the user's own
+    # primary group (the usual result of "umask 002" or of unpacking a tarball).
     case "${mode:2:1}" in 2|3|6|7) return 1 ;; esac
+    case "${mode:1:1}" in 2|3|6|7) [[ "$group" == "$(id -g)" ]] || return 1 ;; esac
     return 0
 }
 
@@ -135,7 +139,7 @@ case "$SOURCE_MODE" in
         SRC="$self_dir" ;;
     auto)
         if [[ -n "$self_dir" ]] && has_sources "$self_dir"; then
-            is_checkout "$self_dir" || die "$self_dir looks like a checkout but is owned by another user or writable by group/others, so its files cannot be trusted. Fix its permissions (chmod -R go-w), or re-run with --download."
+            is_checkout "$self_dir" || die "$self_dir looks like a checkout but is owned by another user or writable by others, so its files cannot be trusted. Fix its permissions (chmod -R go-w), or re-run with --download."
             SRC="$self_dir"
         fi ;;
 esac

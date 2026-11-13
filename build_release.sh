@@ -51,7 +51,8 @@ rm -rf -- dist
 mkdir dist
 mv -- "encryptor_${version}-1_all.deb" dist/
 
-git archive --format=tar.gz --prefix="encryptor-${version}/" -o "dist/encryptor-${version}.tar.gz" HEAD
+# tar.umask=022: directories are archived as 755 (git's default is 775).
+git -c tar.umask=0022 archive --format=tar.gz --prefix="encryptor-${version}/" -o "dist/encryptor-${version}.tar.gz" HEAD
 
 # The tarball must be installable on its own.
 work="$(mktemp -d)"
