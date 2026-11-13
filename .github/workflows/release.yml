@@ -30,7 +30,7 @@ jobs:
         if: github.ref_type != 'tag'
         run: ./build_release.sh
       - name: Attach artifacts to the workflow run
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: encryptor-release
           path: dist/
