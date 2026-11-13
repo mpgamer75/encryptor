@@ -117,7 +117,7 @@ Found by the author while verifying the reviews:
 
 ## Platforms the fixes were verified on
 
-`tests/run.sh` (168 assertions) passes on OpenSSL 1.1.1 (Alpine 3.14, Ubuntu
+`tests/run.sh` (169 assertions) passes on OpenSSL 1.1.1 (Alpine 3.14, Ubuntu
 20.04), 3.0 (Ubuntu 22.04/24.04), 3.5 (Alpine 3.24, musl), 4.0 (Fedora, during
 the RPM build) and on macOS with Homebrew Bash and OpenSSL. The reviewers
 themselves tested on OpenSSL 3.0 only.

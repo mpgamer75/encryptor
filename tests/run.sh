@@ -506,8 +506,17 @@ check    "completion script is valid bash"      bash -c "bash '$ENC' completion 
 
 # ------------------------------------------------------------------------------
 section "Installer and uninstaller"
-check    "install from the checkout into a prefix"   bash -c "'$ROOT/install.sh' --prefix '$WORK/prefix' >/dev/null 2>&1 && '$WORK/prefix/bin/encryptor' version | grep -q '^Encryptor v'"
-check    "installed tree is world-readable even under umask 077" bash -c "(umask 077; '$ROOT/install.sh' --prefix '$WORK/prefix77' >/dev/null 2>&1); [[ \$(stat -c%a '$WORK/prefix77/lib/encryptor' 2>/dev/null || stat -f%Lp '$WORK/prefix77/lib/encryptor') == 755 ]]"
+# Work from a copy owned by the user running the tests: the installer rightly
+# refuses a source tree that belongs to someone else (as a checkout does when
+# the suite runs inside a container under a different uid).
+SRC_COPY="$WORK/src-copy"
+mkdir -p "$SRC_COPY"
+cp -R "$ROOT/encryptor.sh" "$ROOT/install.sh" "$ROOT/uninstall.sh" "$ROOT/lib" "$ROOT/man" "$ROOT/tests" "$SRC_COPY/"
+chmod -R go-w "$SRC_COPY"
+check    "install from the checkout into a prefix"   bash -c "'$SRC_COPY/install.sh' --prefix '$WORK/prefix' >/dev/null 2>&1 && '$WORK/prefix/bin/encryptor' version | grep -q '^Encryptor v'"
+check    "installed tree is world-readable even under umask 077" bash -c "(umask 077; '$SRC_COPY/install.sh' --prefix '$WORK/prefix77' >/dev/null 2>&1); [[ \$(stat -c%a '$WORK/prefix77/lib/encryptor' 2>/dev/null || stat -f%Lp '$WORK/prefix77/lib/encryptor') == 755 ]]"
+cp -R "$SRC_COPY" "$WORK/src-open"; chmod o+w "$WORK/src-open" "$WORK/src-open/lib"
+check_rc 1 "installer refuses a complete checkout that others can write" bash -c "'$WORK/src-open/install.sh' --prefix '$WORK/prefix-open'"
 # Files planted next to a lone install.sh in a directory others can write.
 mkdir -p planted/lib planted/tests planted/man; chmod 777 planted
 for m in core ui crypto certs audit tui cli; do echo ': planted' > "planted/lib/$m.sh"; done
@@ -515,10 +524,10 @@ printf '#!/bin/bash\necho PWNED >> "%s/pwned.log"\n' "$WORK" > planted/encryptor
 touch planted/tests/run.sh planted/man/encryptor.1; cp "$ROOT/install.sh" planted/
 check_rc 1 "installer refuses sources in a directory others can write" bash -c "cd / && bash '$WORK/planted/install.sh' --prefix '$WORK/prefix-planted'"
 check    "planted code was never executed"           test ! -e "$WORK/pwned.log"
-check_rc 1 "--local cannot be combined with a pinned ref" bash -c "ENCRYPTOR_REF=v0.0.0 '$ROOT/install.sh' --local --prefix '$WORK/prefix-x'"
-check_rc 1 "an invalid ENCRYPTOR_REF is refused"     bash -c "ENCRYPTOR_REF='../../other/repo' '$ROOT/install.sh' --prefix '$WORK/prefix-x'"
+check_rc 1 "--local cannot be combined with a pinned ref" bash -c "ENCRYPTOR_REF=v0.0.0 '$SRC_COPY/install.sh' --local --prefix '$WORK/prefix-x'"
+check_rc 1 "an invalid ENCRYPTOR_REF is refused"     bash -c "ENCRYPTOR_REF='../../other/repo' '$SRC_COPY/install.sh' --prefix '$WORK/prefix-x'"
 mkdir -p "$TMPDIR/encryptor.wiki" "$TMPDIR/encryptor_backup-2026"
-check    "uninstall removes the prefix install"      bash -c "'$ROOT/uninstall.sh' --prefix '$WORK/prefix' </dev/null >/dev/null 2>&1; test ! -e '$WORK/prefix/bin/encryptor'"
+check    "uninstall removes the prefix install"      bash -c "'$SRC_COPY/uninstall.sh' --prefix '$WORK/prefix' </dev/null >/dev/null 2>&1; test ! -e '$WORK/prefix/bin/encryptor'"
 check    "uninstall leaves unrelated 'encryptor*' directories in TMPDIR alone" test -d "$TMPDIR/encryptor.wiki" -a -d "$TMPDIR/encryptor_backup-2026"
 check    "uninstall keeps user data without confirmation" test -d "$ENCRYPTOR_CONFIG_DIR/certs"
 
