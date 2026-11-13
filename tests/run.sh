@@ -17,6 +17,10 @@ VERBOSE=0; [[ "${1:-}" == "-v" ]] && VERBOSE=1
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/encryptor-tests.XXXXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 export ENCRYPTOR_CONFIG_DIR="$WORK/config"
+# Private temp area: the "nothing left behind" checks must not see temporary
+# directories of other Encryptor processes running on the same machine.
+export TMPDIR="$WORK/tmp"
+mkdir -p "$TMPDIR"
 export NO_COLOR=1
 unset ENCRYPTOR_PBKDF2_ITER ENCRYPTOR_NO_LOG
 cd "$WORK" || exit 1
