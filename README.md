@@ -19,7 +19,7 @@
 
 ## Why Encryptor
 
-- **Authenticated by construction.** Every file is a self-describing `ENCRYPTOR/3` container: cipher + HMAC-SHA256 (encrypt-then-MAC). A wrong password or a single flipped bit is detected *before* any plaintext is written.
+- **Authenticated by construction.** Every file is a self-describing `ENCRYPTOR/3` container: cipher + HMAC-SHA256 (encrypt-then-MAC). A wrong password, a single flipped bit, or a file altered while it is being read never produces output.
 - **X.509 recipients.** Encrypt for one or more people using the certificates your organisation already issues (RSA or EC). No shared password.
 - **No new dependencies, nothing to trust but OpenSSL.** About 4,000 lines of readable Bash on top of the `openssl` binary already on your servers. Works on air-gapped and locked-down hosts.
 - **Recoverable without this tool.** The format is documented and every file can be decrypted with stock `openssl` commands ([docs/FORMAT.md](docs/FORMAT.md)).
@@ -34,11 +34,11 @@
 curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
 ```
 
-Installs to `~/.local` (or `/usr/local` when run as root); set `PREFIX` to choose. For a reproducible install, pin a release and its checksum:
+Installs to `~/.local` (or `/usr/local` when run as root); set `PREFIX` to choose. That command tracks the `main` branch and relies on HTTPS alone. For a verified, reproducible install, pin a release — the installer then downloads the release tarball and checks it against the release's `SHA256SUMS`, or against a checksum you supply:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/v3.0.0/install.sh \
-  | ENCRYPTOR_REF=v3.0.0 ENCRYPTOR_SHA256=<sha256 from the release page> bash
+  | ENCRYPTOR_REF=v3.0.0 ENCRYPTOR_SHA256=<sha256 of encryptor-3.0.0.tar.gz, from SHA256SUMS> bash
 ```
 
 Other options:
@@ -47,7 +47,8 @@ Other options:
 |---|---|
 | From a checkout | `git clone https://github.com/mpgamer75/encryptor && cd encryptor && ./install.sh` |
 | Debian / Ubuntu package | `./build_deb.sh && sudo apt install ./encryptor_3.0.0-1_all.deb` |
-| Docker | `docker build -t encryptor . && docker run --rm -it -v "$PWD:/data" encryptor` |
+| Docker | `docker build -t encryptor . && docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/data" encryptor` |
+| RPM | `rpmbuild -ba encryptor.spec` (Fedora/RHEL; runs the test suite in `%check`) |
 | No install | `./encryptor.sh` from the repository |
 
 **Requirements:** Bash 4.4+, OpenSSL 1.1.1+ (3.x recommended), coreutils. macOS: `brew install bash openssl@3`.
@@ -127,7 +128,7 @@ Full reference: [docs/USAGE.md](docs/USAGE.md) · `encryptor help` · `man encry
 | | |
 |---|---|
 | Container | `ENCRYPTOR/3`: text header (mode, cipher, KDF parameters) + ciphertext + 256-bit tag |
-| Integrity | HMAC-SHA256 over header and ciphertext, verified before decryption (encrypt-then-MAC) |
+| Integrity | HMAC-SHA256 over header and ciphertext (encrypt-then-MAC); the file is read once and output is released only if the tag over the bytes actually decrypted is correct |
 | Ciphers | AES-256-CTR (default), ChaCha20, AES-256-CBC, Camellia-256-CBC, ARIA-256-CBC |
 | Password KDF | **scrypt** (N=2^14, r=8, p=5 — memory-hard, an OWASP-listed configuration) sealing a random file key; or PBKDF2-HMAC-SHA256, 600,000 iterations with `--kdf pbkdf2` |
 | Recipients | Random 256-bit file key wrapped per certificate with CMS (RSA-OAEP-SHA256 or ECDH) |
@@ -172,7 +173,7 @@ Choose **age** when you can install a binary and want pipe-to-pipe streaming or 
 
 ## Upgrading from 2.x
 
-- 2.x files (`openssl enc` output and S/MIME) still decrypt: `encryptor decrypt old.enc` (add `--algo` and, for 2.0 files, `--legacy-iter 100000`). They are not authenticated — re-encrypt them. `encryptor audit` lists the ones in the current directory.
+- 2.x files (`openssl enc` output and S/MIME) still decrypt, but only on request: `encryptor decrypt --legacy old.enc` (add `--algo` and, for 2.0 files, `--legacy-iter 100000`). They carry no authentication, so they are never opened implicitly — otherwise swapping an authenticated file for a 2.x-style one would go unnoticed. Re-encrypt them; `encryptor audit` counts the ones in the current directory.
 - New files are always `ENCRYPTOR/3`. The `.sha256` sidecar files are gone: integrity is inside the file and is keyed.
 - `--encrypt FILE` / `--decrypt FILE` still work. Decryption now writes `FILE` (not `FILE.dec`) and refuses to overwrite without `--force`.
 - `.deb` packages install to `/usr/bin` and `/usr/lib/encryptor`.
@@ -182,7 +183,7 @@ See [CHANGELOG.md](CHANGELOG.md).
 ## Development
 
 ```bash
-bash tests/run.sh          # 110+ assertions: round trips, tampering, CLI, PKI, legacy, UI smoke
+bash tests/run.sh          # 160+ assertions: round trips, tampering, races, CLI, PKI, installer, UI smoke
 ./build_release.sh         # version consistency, tests, .deb, tarball, SHA256SUMS → dist/
 shellcheck encryptor.sh lib/*.sh tests/run.sh
 ```
@@ -205,4 +206,4 @@ Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report vulner
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2024–2026 mpgamer75.
 
-Encryptor has not had a professional third-party cryptographic audit. It composes standard primitives in a standard way, and the composition is small enough to read in one sitting — please do.
+Encryptor has been through an independent adversarial code review; its findings and how each was resolved are in [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md). It has **not** had a professional third-party cryptographic audit. It composes standard primitives in a standard way, and the composition is small enough to read in one sitting — please do.

@@ -47,6 +47,8 @@ for prefix in "${PREFIXES[@]}"; do
     remove "$prefix/lib/encryptor"
     remove "$prefix/share/man/man1/encryptor.1"
     remove "$prefix/share/man/man1/encryptor.1.gz"
+    remove "$prefix/man/man1/encryptor.1"          # layouts used by 2.x
+    remove "$prefix/man/man1/encryptor.1.gz"
     remove "$prefix/share/bash-completion/completions/encryptor"
 done
 (( removed )) || printf '%sNo Encryptor installation found under: %s%s\n' "$Y" "${PREFIXES[*]}" "$N"
@@ -63,11 +65,30 @@ if [[ -d "$CONFIG_DIR" ]]; then
         read -r reply
         [[ "$reply" == "DELETE" ]] && answer="y"
     fi
-    if [[ "$answer" == "y" ]]; then remove "$CONFIG_DIR"; else printf 'Kept %s\n' "$CONFIG_DIR"; fi
+    if [[ "$answer" == "y" ]]; then
+        # Only ever delete something that is recognisably an Encryptor state directory.
+        if [[ -d "$CONFIG_DIR/certs" || -f "$CONFIG_DIR/encryptor.log" ]] && [[ "$CONFIG_DIR" != "/" && "$CONFIG_DIR" != "$HOME" ]]; then
+            remove "$CONFIG_DIR"
+        else
+            printf '%s!%s %s does not look like an Encryptor state directory; left untouched.\n' "$Y" "$N" "$CONFIG_DIR" >&2
+        fi
+    else
+        printf 'Kept %s\n' "$CONFIG_DIR"
+    fi
 fi
 
-# Stale temporary directories owned by this user (normally none).
-find "${TMPDIR:-/tmp}" -maxdepth 1 -type d \( -name 'encryptor.*' -o -name 'encryptor_*' \) -user "$(id -un)" -exec rm -rf -- {} + 2>/dev/null || true
+# Stale temporary directories left by a crashed run. Only names with the exact
+# shape Encryptor creates (mktemp "encryptor.XXXXXXXXXX", or 2.x "encryptor_<pid>"),
+# owned by this user and untouched for over an hour — never a directory that
+# merely starts with "encryptor", and never one a running instance is using.
+tmp_root="${TMPDIR:-/tmp}"
+for d in "$tmp_root"/encryptor.?????????? "$tmp_root"/encryptor_[0-9]*; do
+    [[ -d "$d" && ! -L "$d" && -O "$d" ]] || continue
+    name="${d##*/}"
+    [[ "$name" =~ ^encryptor\.[A-Za-z0-9]{10}$ || "$name" =~ ^encryptor_[0-9]+$ ]] || continue
+    [[ -n "$(find "$d" -maxdepth 0 -mmin +60 2>/dev/null)" ]] || continue
+    remove "$d"
+done
 
 (( failed )) && exit 1
 printf '\n%sDone.%s\n' "$G" "$N"

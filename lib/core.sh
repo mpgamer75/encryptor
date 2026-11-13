@@ -20,7 +20,11 @@ readonly EX_UNSUPPORTED=6   # unknown format / algorithm not available
 readonly EX_INTERRUPTED=130 # SIGINT
 
 # --- Paths ---
-CONFIG_DIR="${ENCRYPTOR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/encryptor}"
+if [[ -z "${ENCRYPTOR_CONFIG_DIR:-}" && -z "${XDG_CONFIG_HOME:-}" && -z "${HOME:-}" ]]; then
+    printf 'encryptor: HOME is not set; set HOME or ENCRYPTOR_CONFIG_DIR.\n' >&2
+    exit 1
+fi
+CONFIG_DIR="${ENCRYPTOR_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/encryptor}"
 CERT_DIR="$CONFIG_DIR/certs"
 TOOLS_DIR="$CONFIG_DIR/tools"
 LOG_FILE="$CONFIG_DIR/encryptor.log"
@@ -178,9 +182,63 @@ now_ms() {
     if [[ "$n" =~ ^[0-9]{16,}$ ]]; then printf '%s' "$(( n / 1000000 ))"; else printf '%s' "$(( $(date +%s) * 1000 ))"; fi
 }
 
+# OpenSSL date ("Nov 13 09:18:03 2026 GMT") → epoch seconds; empty on failure.
+core_date_epoch() {
+    local d="$1" e
+    e=$(date -u -d "$d" +%s 2>/dev/null) || e=$(date -u -j -f '%b %d %T %Y %Z' "$d" +%s 2>/dev/null) || e=""
+    printf '%s' "$e"
+}
+
+# Text that is safe to print on a terminal: control characters (C0, DEL, and
+# the C1 range / line separators as encoded in UTF-8) are replaced by "?".
+# Everything derived from a file name, a certificate or any other untrusted
+# source goes through this before it is displayed, so it cannot move the
+# cursor, repaint the screen or forge extra lines.
+ui_safe() {
+    local s="$1" LC_ALL=C
+    s=${s//[$'\001'-$'\037'$'\177']/?}
+    s=${s//$'\xc2'[$'\x80'-$'\x9f']/?}
+    s=${s//$'\xe2\x80'[$'\xa8'$'\xa9']/?}
+    printf '%s' "$s"
+}
+ui_base() { ui_safe "${1##*/}"; }
+
+# Do two paths name the same existing file (same device and inode)?
+same_file() { [[ -e "$1" && -e "$2" && "$1" -ef "$2" ]]; }
+
+# Is the string well-formed UTF-8? (Portable byte-level check: iconv cannot be
+# relied on for this — musl's accepts invalid input.)
+_core_is_utf8() {
+    printf '%s' "$1" | od -An -v -tu1 | awk '
+        { for (i = 1; i <= NF; i++) {
+              b = $i + 0
+              if (need > 0) {
+                  if (b < lo || b > hi) bad = 1
+                  lo = 128; hi = 191; need--
+                  continue
+              }
+              lo = 128; hi = 191
+              if (b < 128) continue
+              else if (b >= 194 && b <= 223) need = 1
+              else if (b == 224) { need = 2; lo = 160 }
+              else if (b == 237) { need = 2; hi = 159 }
+              else if (b >= 225 && b <= 239) need = 2
+              else if (b == 240) { need = 3; lo = 144 }
+              else if (b == 244) { need = 3; hi = 143 }
+              else if (b >= 241 && b <= 243) need = 3
+              else bad = 1
+          } }
+        END { exit (bad || need > 0) }'
+}
+
 # JSON string escaping (RFC 8259): quotes, backslashes and control characters.
+# Strings that are not valid UTF-8 (possible in file names) have their
+# non-ASCII bytes replaced, so every emitted line is parseable JSON.
 json_escape() {
     local s="$1"
+    if [[ "$s" == *[!$' '-'~']* ]] && ! _core_is_utf8 "$s"; then
+        s=$(printf '%s' "$s" | LC_ALL=C tr '\200-\377' '?')
+    fi
     s=${s//\\/\\\\}
     s=${s//\"/\\\"}
     s=${s//$'\n'/\\n}

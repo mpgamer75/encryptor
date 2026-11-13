@@ -71,6 +71,7 @@ encryptor encrypt -p pass.txt -o out.enc in.dat  # explicit output
 encryptor encrypt -a chacha20 -p pass.txt in.dat # another cipher
 encryptor encrypt --kdf pbkdf2 -p pass.txt in.dat # NIST-approved KDF instead of scrypt
 encryptor encrypt -p pass.txt --shred in.dat     # verify the copy, then delete the original
+encryptor encrypt -r bob.pem -k bob.key --shred in.dat   # with recipients, --key is needed to verify
 ```
 
 - Password-protected files use **scrypt** (memory-hard) by default. `--kdf pbkdf2`
@@ -79,7 +80,9 @@ encryptor encrypt -p pass.txt --shred in.dat     # verify the copy, then delete 
   file records what was used.
 - An existing output is never overwritten unless `--force` is given (exit 5).
 - Output files are created with mode 0600.
-- A directory is refused with the `tar` one-liner to use instead:
+- Input and output may not be the same file (checked by identity, not by
+  spelling), and the output may not be a directory.
+- A directory as input is refused with the `tar` one-liner to use instead:
 
 ```bash
 tar cz project/ | encryptor encrypt -p pass.txt -o project.tgz.enc -
@@ -94,13 +97,15 @@ cat x.enc | encryptor decrypt -p pass.txt -      # from standard input
 ```
 
 The default output name strips `.enc` (or appends `.dec` if there is no such
-suffix). Nothing is written unless authentication succeeds.
+suffix). The file is read once; the output appears only if the authentication
+tag over the bytes that were decrypted is correct.
 
 ### Streams
 
-`-` as FILE reads standard input; `-o -` writes to standard output. Because
-the authentication tag is checked before decrypting, input from a pipe is
-first spooled to a private temporary file (it contains ciphertext only).
+`-` as FILE reads standard input; `-o -` writes to standard output. Bytes
+written to a pipe cannot be taken back, so in those cases the ciphertext is
+first staged in a private temporary directory and verified there (set `TMPDIR`
+if `/tmp` is too small for the file).
 
 ## Passwords and other secrets
 
@@ -110,12 +115,13 @@ precedence:
 | Option | Source |
 |---|---|
 | `-p`, `--pass-file FILE` | First line of FILE. A warning is printed if the file is readable by others. |
-| `--pass-env VAR` | Environment variable VAR. |
+| `--pass-env VAR` | Environment variable VAR (removed from the environment before any helper process starts). |
 | `--pass-stdin` | First line of standard input (not combinable with `-` as input). |
 | *(none)* | Prompt on the terminal, without echo. |
 
 With no source and no terminal the command fails with exit 2 rather than
-hanging. Passwords may be up to 1000 characters; the first line is used and a
+hanging. Passwords must be a single line of at most 1000 bytes (anything that OpenSSL
+would silently cut is refused); from a password file the first line is used and a
 trailing carriage return is removed.
 
 ```bash
@@ -145,6 +151,10 @@ refused. A certificate whose `keyUsage` forbids key encipherment/agreement
 
 Recipient mode proves the file was not modified, not who created it.
 
+`--shred` with recipients requires `--key` (one recipient's private key), so
+that the encrypted file can be opened and verified before the original is
+deleted.
+
 ## Certificates and keys
 
 All objects live in `~/.config/encryptor/certs/` as `NAME.pem` (certificate),
@@ -172,17 +182,24 @@ menu **Certificates & keys** offers:
 9. **Export to PKCS#12** — AES-256-CBC with PBKDF2 and a SHA-256 MAC.
 
 Key types: ECDSA P-256 (default) and P-384, RSA 3072 and 4096. When creating
-a key you are asked whether to protect it with a passphrase (recommended;
-AES-256).
+a key you are asked whether to protect it with a passphrase (recommended):
+the key file is then encrypted with AES-256 under PBKDF2-HMAC-SHA256 at
+600,000 iterations.
+
+Before a CSR is signed, its subject and key type are shown and must be
+confirmed. A CA that has expired or whose key usage does not allow signing is
+refused, and a certificate cannot be issued for longer than its CA remains
+valid.
 
 ## Inspect and verify
 
 ```bash
 $ encryptor inspect contract.docx.enc
 File:        contract.docx.enc (48.3 KiB)
-Format:      ENCRYPTOR/3 (authenticated, encrypt-then-MAC)
+Format:      ENCRYPTOR/3 (encrypt-then-MAC with HMAC-SHA256)
+Verified:    no — inspect only reads the header; run "encryptor verify" to check the tag
 Cipher:      AES-256-CTR + HMAC-SHA256
-Key:         2 certificate recipient(s), CMS key wrap
+Key:         2 certificate recipient(s) listed in the header, CMS key wrap
   recipient: sha256:7a38bc15…
   recipient: sha256:b0f274d0…
 Payload:     48.0 KiB
@@ -190,7 +207,8 @@ Payload:     48.0 KiB
 $ encryptor verify -p pass.txt backup.enc && echo intact
 ```
 
-`inspect` needs no secret. `verify` needs the password or key and exits 3 on
+`inspect` needs no secret and proves nothing about the content: it reads the
+header (its JSON says `"verified":false`). `verify` needs the password or key and exits 3 on
 any mismatch; it never writes plaintext, which makes it suitable for checking
 backups.
 
@@ -222,15 +240,19 @@ Cron example:
 
 ## Legacy 2.x files
 
-Files written by Encryptor 2.0/2.1 are recognised automatically and can be
-decrypted, with a warning that they carry no authentication:
+Files written by Encryptor 2.0/2.1 are recognised, but they carry no
+authentication tag: nothing can tell whether such a file was modified or
+replaced. They are therefore refused (exit 6) unless you ask for them
+explicitly with `--legacy`, and the warning cannot be silenced:
 
 ```bash
-encryptor decrypt -p pass.txt old.enc                                   # 2.1, aes-256-cbc
-encryptor decrypt -p pass.txt -a chacha20 old.enc                       # 2.1, another cipher
-encryptor decrypt -p pass.txt -a aes-256-ctr --legacy-iter 100000 old.enc   # written by 2.0
-encryptor decrypt -k my.key -c my.pem old-smime.enc                     # 2.x S/MIME
+encryptor decrypt --legacy -p pass.txt old.enc                                   # 2.1, aes-256-cbc
+encryptor decrypt --legacy -p pass.txt -a chacha20 old.enc                       # 2.1, another cipher
+encryptor decrypt --legacy -p pass.txt -a aes-256-ctr --legacy-iter 100000 old.enc   # written by 2.0
+encryptor decrypt --legacy -k my.key -c my.pem old-smime.enc                     # 2.x S/MIME
 ```
+
+Use `--legacy` only for files you created yourself or whose origin you trust.
 
 The cipher was not stored in 2.x files, so it has to be supplied (default
 `aes-256-cbc`). To migrate, decrypt and encrypt again; `encryptor audit`
@@ -243,6 +265,7 @@ With `--json`, one object per processed file is written to standard output
 
 ```json
 {"status":"success","operation":"encrypt","input":"db.sql","output":"db.sql.enc","format":"encryptor/3","mode":"password","algo":"aes-256-ctr","kdf":"scrypt","bytes_in":1048576,"bytes_out":1048929,"ms":412}
+{"status":"success","operation":"decrypt","input":"db.sql.enc","output":"db.sql","format":"encryptor/3","mode":"password","algo":"aes-256-ctr","verified":true,"bytes_in":1048929,"bytes_out":1048576,"ms":398}
 {"status":"error","operation":"decrypt","input":"db.sql.enc","code":3,"error":"Authentication failed: wrong password, or the file has been modified or corrupted."}
 ```
 
@@ -294,6 +317,9 @@ source <(encryptor completion zsh)       # add to ~/.zshrc
 The tag did not verify. By design the tool cannot tell these cases apart.
 Check the password (keyboard layout, trailing spaces in a password file), and
 compare the file's size or checksum with the original.
+
+**"… is a legacy Encryptor 2.x file with NO authentication."**
+See [Legacy 2.x files](#legacy-2x-files): add `--legacy` if you trust the file.
 
 **"Could not unwrap the file key."**
 The private key is not one of the recipients, or its passphrase is wrong.

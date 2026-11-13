@@ -6,6 +6,9 @@
 
 readonly TESTSSL_REPO="https://github.com/testssl/testssl.sh.git"
 readonly TESTSSL_TAG="v3.2.5"        # pinned release — never an unpinned branch
+# The commit that tag pointed to when it was reviewed. Tags can be moved; the
+# download is refused unless it is exactly this commit.
+readonly TESTSSL_COMMIT="4f17be931a9d60f3f987975aea8221f1a8eaf7aa"
 
 declare -a AUDIT_ID=() AUDIT_STATUS=() AUDIT_TITLE=() AUDIT_DETAIL=() AUDIT_FIX=()
 AUDIT_SCORE=0; AUDIT_MAX=0; AUDIT_FAILS=0; AUDIT_WARNS=0
@@ -34,7 +37,7 @@ audit_run() {
             if   (( OPENSSL_MAJOR >= 3 )); then _audit_add openssl pass "OpenSSL version" "$OPENSSL_VERSION_TEXT — supported release line. Keep it patched through your OS updates."
             elif [[ "$OPENSSL_VERSION_TEXT" == *" 1.1.1"* ]]; then _audit_add openssl warn "OpenSSL version" "$OPENSSL_VERSION_TEXT — the 1.1.1 line reached end of life in September 2023." "Upgrade to OpenSSL 3.x"
             else _audit_add openssl fail "OpenSSL version" "$OPENSSL_VERSION_TEXT — too old (PBKDF2 support requires 1.1.1+)." "Upgrade to OpenSSL 3.x"; fi ;;
-        libressl) _audit_add openssl pass "Crypto library" "$OPENSSL_VERSION_TEXT" ;;
+        libressl) _audit_add openssl info "Crypto library" "$OPENSSL_VERSION_TEXT — not assessed by this audit; keep it current. scrypt-sealed files need OpenSSL." ;;
         *)        _audit_add openssl warn "Crypto library" "Unrecognised: ${OPENSSL_VERSION_TEXT:-unknown}" ;;
     esac
 
@@ -74,44 +77,67 @@ audit_run() {
     mode=$(get_file_mode "$CERT_DIR")
     if [[ "$mode" != "700" ]]; then _audit_add cert-dir-perms fail "Key store directory" "$CERT_DIR has mode ${mode:-?}." "chmod 700 '$CERT_DIR'"; fi
 
-    # 7. Private keys: permissions and passphrase protection
-    local k total=0 loose="" unprotected=0
+    # 7. Private keys: permissions, passphrase protection, strength of that protection
+    local k total=0 loose="" unprotected=0 weakkdf="" it
     for k in "$CERT_DIR"/*.key; do
         [[ -f "$k" ]] || continue
         (( total++ ))
         mode=$(get_file_mode "$k")
-        [[ "$mode" == "400" || "$mode" == "600" ]] || loose+="$(basename "$k")($mode) "
-        crypto_key_is_encrypted "$k" || (( unprotected++ ))
+        [[ "$mode" == "400" || "$mode" == "600" ]] || loose+="$(ui_base "$k")($mode) "
+        if crypto_key_is_encrypted "$k"; then
+            # PBKDF2 iteration count inside the PKCS#8 envelope (first INTEGER after the PBKDF2 identifier).
+            it=$(openssl asn1parse -in "$k" 2>/dev/null | awk '/:PBKDF2/ { f = 1; next } f == 1 && /INTEGER/ { sub(/.*:/, ""); print; f = 2 }')
+            if [[ "$it" =~ ^[0-9A-Fa-f]{1,8}$ ]] && (( 16#$it < 100000 )); then weakkdf+="$(ui_base "$k")($(( 16#$it )) iterations) "; fi
+        else
+            (( unprotected++ ))
+        fi
     done
     if (( total == 0 )); then _audit_add key-perms info "Private key permissions" "No private keys in the store."
     elif [[ -z "$loose" ]]; then _audit_add key-perms pass "Private key permissions" "All $total key(s) are owner-only (400/600)."
     else _audit_add key-perms fail "Private key permissions" "Readable by others: ${loose% }" "chmod 400 '$CERT_DIR'/*.key"; fi
     if (( total > 0 )); then
-        if (( unprotected == 0 )); then _audit_add key-encryption pass "Private key protection" "All $total key(s) are passphrase-protected."
-        else _audit_add key-encryption warn "Private key protection" "$unprotected of $total key(s) are stored without a passphrase." "openssl pkey -in KEY -aes-256-cbc -out KEY.new"; fi
+        if (( unprotected > 0 )); then
+            _audit_add key-encryption warn "Private key protection" "$unprotected of $total key(s) are stored without a passphrase." "openssl pkcs8 -topk8 -v2 aes-256-cbc -iter 600000 -in KEY -out KEY.new"
+        elif [[ -n "$weakkdf" ]]; then
+            _audit_add key-encryption warn "Private key protection" "Passphrase-protected with a weak work factor: ${weakkdf% }" "openssl pkcs8 -topk8 -v2 aes-256-cbc -iter 600000 -in KEY -out KEY.new"
+        else
+            _audit_add key-encryption pass "Private key protection" "All $total key(s) are passphrase-protected."
+        fi
     fi
 
-    # 8. Certificates: expiry and strength
-    local f expired="" expiring="" weak="" ncert=0 level msg
+    # 8. Certificates: expiry and strength. Files that are not certificates are
+    #    reported, never silently skipped; a private key saved as .pem is an error.
+    local f expired="" expiring="" weak="" unsure="" ncert=0 level msg unreadable="" keyinpem=""
     for f in "$CERT_DIR"/*.pem; do
         [[ -f "$f" ]] || continue
-        pki_cert_info "$f" || continue
+        if grep -q -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' -- "$f" 2>/dev/null; then
+            keyinpem+="$(ui_base "$f")($(get_file_mode "$f")) "
+        fi
+        if ! pki_cert_info "$f"; then unreadable+="$(ui_base "$f") "; continue; fi
         (( ncert++ ))
         case "${PKI_INFO[status]}" in
-            expired)  expired+="$(basename "$f") " ;;
-            expiring) expiring+="$(basename "$f")(${PKI_INFO[days_left]}d) " ;;
+            expired)  expired+="$(ui_base "$f") " ;;
+            expiring) expiring+="$(ui_base "$f")(${PKI_INFO[days_left]}d) " ;;
         esac
         while IFS='|' read -r level msg; do
-            [[ "$level" == "fail" && "$msg" != *EXPIRED* ]] && weak+="$(basename "$f"): $msg "
+            [[ "$level" == "fail" && "$msg" != *EXPIRED* ]] && weak+="$(ui_base "$f"): $msg "
+            [[ "$level" == "warn" && "$msg" == Unrecognised* ]] && unsure+="$(ui_base "$f"): $msg "
         done < <(pki_cert_findings)
     done
+    if [[ -n "$keyinpem" ]]; then
+        _audit_add key-in-pem fail "Private key in a certificate file" "These .pem files contain a private key: ${keyinpem% }" "Move the key to a .key file with mode 400"
+    fi
+    if [[ -n "$unreadable" ]]; then
+        _audit_add cert-unreadable warn "Unreadable certificate files" "Not valid X.509 certificates: ${unreadable% }" "Remove or repair these files"
+    fi
     if (( ncert == 0 )); then _audit_add cert-expiry info "Certificate expiry" "No certificates in the store."
     elif [[ -n "$expired" ]]; then _audit_add cert-expiry fail "Certificate expiry" "Expired: ${expired% }${expiring:+ — expiring soon: ${expiring% }}" "Re-issue the certificate(s)"
     elif [[ -n "$expiring" ]]; then _audit_add cert-expiry warn "Certificate expiry" "Expiring within ${PKI_EXPIRY_WARN_DAYS} days: ${expiring% }" "Plan renewal"
     else _audit_add cert-expiry pass "Certificate expiry" "All $ncert certificate(s) are valid for more than ${PKI_EXPIRY_WARN_DAYS} days."; fi
     if (( ncert > 0 )); then
-        if [[ -z "$weak" ]]; then _audit_add cert-strength pass "Certificate strength" "No weak keys or deprecated signature algorithms."
-        else _audit_add cert-strength fail "Certificate strength" "${weak% }" "Replace the affected certificate(s)"; fi
+        if [[ -n "$weak" ]]; then _audit_add cert-strength fail "Certificate strength" "${weak% }" "Replace the affected certificate(s)"
+        elif [[ -n "$unsure" ]]; then _audit_add cert-strength warn "Certificate strength" "${unsure% }" "Review these certificates manually"
+        else _audit_add cert-strength pass "Certificate strength" "No weak keys or deprecated signature algorithms."; fi
     fi
 
     # 9. Operation log
@@ -121,21 +147,34 @@ audit_run() {
         else _audit_add log-perms fail "Operation log" "$LOG_FILE has mode ${mode:-?}; it reveals file names to other users." "chmod 600 '$LOG_FILE'"; fi
     fi
 
-    # 10. Stale temporary directories (left behind by a crash / SIGKILL)
-    local stale
-    stale=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -type d \( -name 'encryptor.*' -o -name 'encryptor_*' \) -mmin +60 2>/dev/null | grep -vxF "${TEMP_DIR:-/nonexistent}" | wc -l | tr -d ' ')
-    if [[ "${stale:-0}" -eq 0 ]]; then _audit_add temp pass "Temporary files" "No stale temporary directories."
-    else _audit_add temp warn "Temporary files" "$stale stale temporary director(ies) in ${TMPDIR:-/tmp}." "rm -rf '${TMPDIR:-/tmp}'/encryptor.* '${TMPDIR:-/tmp}'/encryptor_*"; fi
+    # 10. Leftovers of a crashed or killed run: temp directories in TMPDIR, and
+    #     in-progress output files (which, for a decryption, hold plaintext).
+    local stale=0 d name tmp_root="${TMPDIR:-/tmp}"
+    for d in "$tmp_root"/encryptor.?????????? "$tmp_root"/encryptor_[0-9]*; do
+        [[ -d "$d" && "$d" != "${TEMP_DIR:-/nonexistent}" ]] || continue
+        name="${d##*/}"
+        [[ "$name" =~ ^encryptor\.[A-Za-z0-9]{10}$ || "$name" =~ ^encryptor_[0-9]+$ ]] || continue
+        [[ -n "$(find "$d" -maxdepth 0 -mmin +60 2>/dev/null)" ]] && (( stale++ ))
+    done
+    if (( stale == 0 )); then _audit_add temp pass "Temporary files" "No stale temporary directories."
+    else _audit_add temp warn "Temporary files" "$stale stale temporary director(ies) in ${tmp_root} (left by an interrupted run)." "Run ./uninstall.sh, or remove the encryptor.XXXXXXXXXX directories older than an hour"; fi
+    local parts=0
+    for f in "$scan_dir"/*.encryptor-part.*; do [[ -f "$f" ]] && (( parts++ )); done
+    if (( parts > 0 )); then
+        _audit_add partial fail "Interrupted output files" "$parts in-progress file(s) (*.encryptor-part.*) in the current directory; they may contain plaintext." "Delete them (shred -u) after checking nothing is still running"
+    fi
 
-    # 11. Legacy, unauthenticated files in the scanned directory
-    local legacy=0 n=0
+    # 11. Legacy, unauthenticated files in the scanned directory (2.x password
+    #     files and 2.x S/MIME files).
+    local legacy=0 n=0 magic
     for f in "$scan_dir"/*.enc; do
         [[ -f "$f" ]] || continue
         (( n++ )); (( n > 500 )) && break
-        [[ "$(file_magic_hex "$f" 8)" == "53616c7465645f5f" ]] && (( legacy++ ))
+        magic=$(file_magic_hex "$f" 16)
+        [[ "$magic" == 53616c7465645f5f* || "$magic" == 2d2d2d2d2d424547494e20504b435337* ]] && (( legacy++ ))
     done
     if (( legacy > 0 )); then
-        _audit_add legacy warn "Legacy encrypted files" "$legacy file(s) in $(ui_pathfit "$(cd "$scan_dir" 2>/dev/null && pwd)") use the unauthenticated 2.x format." "Decrypt and re-encrypt them to upgrade to ENCRYPTOR/3"
+        _audit_add legacy warn "Legacy encrypted files" "$legacy file(s) in $(ui_pathfit "$(cd "$scan_dir" 2>/dev/null && pwd)") use an unauthenticated 2.x format." "Decrypt them with --legacy and re-encrypt to upgrade to ENCRYPTOR/3"
     else
         _audit_add legacy pass "Legacy encrypted files" "No unauthenticated 2.x files in the current directory."
     fi
@@ -219,16 +258,29 @@ audit_install_testssl() {
     ENC_ERR=""
     have git || { ENC_ERR="git is required to install testssl.sh."; return "$EX_FAIL"; }
     core_init_state
-    local dest="$TOOLS_DIR/testssl.sh" staging="$TOOLS_DIR/.testssl.staging.$$"
+    local dest="$TOOLS_DIR/testssl.sh" staging="$TOOLS_DIR/.testssl.staging.$$" got
     rm -rf -- "$staging"
-    if ! git clone --quiet --depth 1 --branch "$TESTSSL_TAG" "$TESTSSL_REPO" "$staging" 2>/dev/null; then
+    if ! GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch "$TESTSSL_TAG" "$TESTSSL_REPO" "$staging" 2>/dev/null; then
         rm -rf -- "$staging"; ENC_ERR="Download failed (network unavailable, or tag $TESTSSL_TAG not found)."; return "$EX_FAIL"
     fi
+    got=$(git -C "$staging" rev-parse HEAD 2>/dev/null)
+    if [[ "$got" != "$TESTSSL_COMMIT" ]]; then
+        rm -rf -- "$staging"
+        ENC_ERR="testssl.sh $TESTSSL_TAG is not the reviewed commit (got ${got:-nothing}, expected $TESTSSL_COMMIT). Nothing was installed."
+        return "$EX_FAIL"
+    fi
     [[ -f "$staging/testssl.sh" ]] || { rm -rf -- "$staging"; ENC_ERR="Unexpected repository content."; return "$EX_FAIL"; }
-    rm -rf -- "$dest"
-    mv -- "$staging" "$dest" || { ENC_ERR="Could not install into $dest"; return "$EX_FAIL"; }
+    # Swap in the new copy; keep the old one until the new one is in place.
+    local old="$TOOLS_DIR/.testssl.old.$$"
+    rm -rf -- "$old"
+    [[ -e "$dest" ]] && { mv -- "$dest" "$old" || { rm -rf -- "$staging"; ENC_ERR="Could not replace $dest"; return "$EX_FAIL"; }; }
+    if ! mv -- "$staging" "$dest"; then
+        [[ -e "$old" ]] && mv -- "$old" "$dest"
+        rm -rf -- "$staging"; ENC_ERR="Could not install into $dest"; return "$EX_FAIL"
+    fi
+    rm -rf -- "$old"
     chmod 755 "$dest/testssl.sh" 2>/dev/null || true
-    log_operation "INFO" "testssl.sh $TESTSSL_TAG installed ($(git -C "$dest" rev-parse --short HEAD 2>/dev/null))"
+    log_operation "INFO" "testssl.sh $TESTSSL_TAG installed (commit ${got:0:12})"
     return 0
 }
 
@@ -244,7 +296,7 @@ audit_ui_menu() {
         ui_select "What would you like to check?" \
             "1|Local audit|self-test, permissions, keys, certificates, legacy files" \
             "2|Remote TLS scan|testssl.sh ${G_DOT} ${tnote}" \
-            "3|Install / update testssl.sh|pinned release ${TESTSSL_TAG}" \
+            "3|Install / update testssl.sh|pinned release ${TESTSSL_TAG}, commit-verified" \
             "-" \
             "q|Back|"
         rc=$?
@@ -300,6 +352,6 @@ audit_ui_install() {
     ui_spinner_start "Downloading testssl.sh ${TESTSSL_TAG}${G_ELLIPSIS}"
     audit_install_testssl; local rc=$?
     ui_spinner_stop
-    if (( rc == 0 )); then ui_ok "testssl.sh ${TESTSSL_TAG} installed."; else ui_err "$ENC_ERR"; fi
+    if (( rc == 0 )); then ui_ok "testssl.sh ${TESTSSL_TAG} installed."; else ui_err "$(ui_safe "$ENC_ERR")"; fi
     ui_pause
 }

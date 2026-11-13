@@ -47,12 +47,11 @@ jobs:
       - name: Run test suite
         run: bash tests/run.sh
 
-  # ── 3. Compatibility (informational: does not block merges) ─────────────────
+  # ── 3. Compatibility (required: these are supported platforms) ───────────────
   compat-openssl-111:
     name: Compatibility — OpenSSL 1.1.1 (Ubuntu 20.04)
     runs-on: ubuntu-latest
     container: ubuntu:20.04
-    continue-on-error: true
     steps:
       - name: Install tools
         run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssl ca-certificates git python3
@@ -65,7 +64,6 @@ jobs:
   compat-macos:
     name: Compatibility — macOS (Homebrew bash + OpenSSL 3)
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -122,14 +120,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build (the Dockerfile runs the self-test)
         run: docker build -t encryptor:ci .
-      - name: Round trip on a mounted volume
+      - name: Round trip on a mounted volume, as the invoking user
         run: |
-          mkdir -m 777 vol
+          mkdir vol
           echo "container payload" > vol/a.txt
           printf 'ci-container-passphrase\n' > vol/pass
-          docker run --rm -v "$PWD/vol:/data" encryptor:ci encrypt -q -p /data/pass a.txt
-          docker run --rm -v "$PWD/vol:/data" encryptor:ci decrypt -q -p /data/pass -o b.txt a.txt.enc
+          chmod 600 vol/pass
+          run() { docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/vol:/data" encryptor:ci "$@"; }
+          run encrypt -q -p /data/pass a.txt
+          run decrypt -q -p /data/pass -o b.txt a.txt.enc
           cmp vol/a.txt vol/b.txt
+          test "$(stat -c '%u %a' vol/a.txt.enc)" = "$(id -u) 600"
           test "$(docker run --rm --entrypoint id encryptor:ci -un)" = encryptor
       - name: Test suite inside the image (Alpine, busybox userland + coreutils)
         run: docker run --rm -v "$PWD:/src:ro" --entrypoint bash encryptor:ci -c 'cd /tmp && bash /src/tests/run.sh'
@@ -143,13 +144,14 @@ jobs:
     container: fedora:latest
     steps:
       - name: Install build tools
-        run: dnf -y install rpm-build openssl bash coreutils git python3 tar gzip
+        run: dnf -y install rpm-build dnf-plugins-core tar gzip
       - uses: actions/checkout@v4
       - name: Build the RPM (runs the test suite in %check)
         run: |
           version="$(sed -n 's/^readonly ENCRYPTOR_VERSION="\(.*\)"$/\1/p' encryptor.sh)"
           mkdir -p ~/rpmbuild/SOURCES
           tar -czf ~/rpmbuild/SOURCES/encryptor-${version}.tar.gz --exclude=.git --transform "s,^\.,encryptor-${version}," .
+          dnf -y builddep encryptor.spec     # only what the spec declares in BuildRequires
           rpmbuild -ba encryptor.spec
       - name: Install and run
         run: |

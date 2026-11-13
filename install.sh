@@ -5,12 +5,21 @@
 #   From a checkout:   ./install.sh
 #   From the network:  curl -fsSL https://raw.githubusercontent.com/mpgamer75/encryptor/main/install.sh | bash
 #
+# Options:
+#   --prefix DIR      install prefix (same as PREFIX=DIR)
+#   --local           install from the directory containing this script
+#   --download        always download, even when run from a checkout
+#
 # Environment:
 #   PREFIX            install prefix (default: /usr/local as root, ~/.local otherwise)
-#   ENCRYPTOR_REF     git tag / branch / commit to download (default: main).
-#                     Pin a release tag for reproducible installs, e.g. v3.0.0
-#   ENCRYPTOR_SHA256  expected SHA-256 of the downloaded tarball (optional but
-#                     recommended with a pinned ENCRYPTOR_REF)
+#   ENCRYPTOR_REF     release tag, branch or commit to download (default: main).
+#                     For a release tag (vX.Y.Z) the release tarball is fetched
+#                     and checked against the release's SHA256SUMS.
+#   ENCRYPTOR_SHA256  expected SHA-256 of the downloaded tarball. When set, the
+#                     download must match it (take it from a source you trust,
+#                     e.g. the SHA256SUMS of the release page).
+#
+# Setting ENCRYPTOR_REF or ENCRYPTOR_SHA256 always forces a verified download.
 #
 # Layout:  $PREFIX/bin/encryptor
 #          $PREFIX/lib/encryptor/*.sh
@@ -20,6 +29,7 @@
 # The installer never edits your shell start-up files and never uses sudo.
 # ==============================================================================
 set -euo pipefail
+umask 022      # installed files must be readable by all users of the prefix
 
 REPO="mpgamer75/encryptor"
 REF="${ENCRYPTOR_REF:-main}"
@@ -39,9 +49,11 @@ usage() {
     cat <<EOF
 Encryptor installer
 
-Usage: install.sh [--prefix DIR] [--help]
+Usage: install.sh [--prefix DIR] [--local | --download] [--help]
 
   --prefix DIR   Install under DIR (same as PREFIX=DIR)
+  --local        Install from the directory containing this script
+  --download     Always download, even when run from a checkout
   --help         Show this help
 
 Environment: PREFIX, ENCRYPTOR_REF, ENCRYPTOR_SHA256 (see the header of this script).
@@ -49,9 +61,12 @@ EOF
 }
 
 PREFIX="${PREFIX:-}"
+SOURCE_MODE="auto"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --prefix)   [[ $# -ge 2 ]] || die "--prefix requires a directory"; PREFIX="$2"; shift 2 ;;
+        --local)    SOURCE_MODE="local"; shift ;;
+        --download) SOURCE_MODE="download"; shift ;;
         --help|-h)  usage; exit 0 ;;
         *)          die "unknown option: $1 (try --help)" ;;
     esac
@@ -77,40 +92,97 @@ for tool in head tail od tr sed awk mktemp stat; do
 done
 
 # --- Locate the sources -------------------------------------------------------
-# Only a real checkout next to this script is trusted as a local source. When
-# the script is piped from the network there is no script path, so files that
-# merely happen to exist in the current directory are never installed.
+# A directory is used as a local source only when it is clearly a checkout the
+# invoking user controls: the complete file set is present, and neither the
+# directory nor lib/ is owned by someone else or writable by group/others.
+# This keeps "sudo bash /tmp/install.sh" from installing files another user
+# planted next to it. When the script is piped from the network there is no
+# script path at all. A pinned ref or checksum always forces a download.
 SRC=""
 WORK=""
 cleanup() { [[ -n "$WORK" && -d "$WORK" ]] && rm -rf -- "$WORK"; return 0; }
 trap cleanup EXIT
 
+dir_is_private() {      # owned by the current user (or root) and not group/world-writable
+    local d="$1" owner mode
+    owner=$(stat -c%u -- "$d" 2>/dev/null) || owner=$(stat -f%u -- "$d" 2>/dev/null) || return 1
+    mode=$(stat -c%a -- "$d" 2>/dev/null) || mode=$(stat -f%Lp -- "$d" 2>/dev/null) || return 1
+    [[ "$owner" == "${EUID:-$(id -u)}" || "$owner" == "0" ]] || return 1
+    mode="${mode: -3}"
+    case "${mode:1:1}" in 2|3|6|7) return 1 ;; esac
+    case "${mode:2:1}" in 2|3|6|7) return 1 ;; esac
+    return 0
+}
+
+has_sources() {
+    local d="$1" m
+    [[ -f "$d/encryptor.sh" && -f "$d/tests/run.sh" && -f "$d/man/encryptor.1" && -d "$d/lib" ]] || return 1
+    for m in "${MODULES[@]}"; do [[ -f "$d/lib/$m.sh" ]] || return 1; done
+}
+is_checkout() { has_sources "$1" && dir_is_private "$1" && dir_is_private "$1/lib"; }
+
 self="${BASH_SOURCE[0]:-}"
-if [[ -n "$self" && -f "$self" ]]; then
-    self_dir="$(cd -P "$(dirname "$self")" && pwd)"
-    if [[ -f "$self_dir/encryptor.sh" && -f "$self_dir/lib/core.sh" ]]; then SRC="$self_dir"; fi
+self_dir=""
+if [[ -n "$self" && -f "$self" ]]; then self_dir="$(cd -P "$(dirname "$self")" && pwd)"; fi
+
+if [[ -n "${ENCRYPTOR_REF:-}" || -n "${ENCRYPTOR_SHA256:-}" ]]; then
+    [[ "$SOURCE_MODE" == "local" ]] && die "--local cannot be combined with ENCRYPTOR_REF / ENCRYPTOR_SHA256"
+    SOURCE_MODE="download"
 fi
+case "$SOURCE_MODE" in
+    local)
+        [[ -n "$self_dir" ]] && is_checkout "$self_dir" || die "--local: $self_dir is not a complete Encryptor checkout that only you can modify"
+        SRC="$self_dir" ;;
+    auto)
+        if [[ -n "$self_dir" ]] && has_sources "$self_dir"; then
+            is_checkout "$self_dir" || die "$self_dir looks like a checkout but is owned by another user or writable by group/others, so its files cannot be trusted. Fix its permissions (chmod -R go-w), or re-run with --download."
+            SRC="$self_dir"
+        fi ;;
+esac
+
+fetch() {       # fetch URL DEST — HTTPS only, including redirects
+    local url="$1" dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 "$url" -o "$dest"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --https-only --max-redirect=5 "$url" -O "$dest"
+    else
+        die "curl or wget is required to download Encryptor"
+    fi
+}
 
 if [[ -n "$SRC" ]]; then
     ok "Installing from local checkout: $SRC"
 else
+    [[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ && "$REF" != *..* ]] || die "invalid ENCRYPTOR_REF: $REF"
     WORK="$(mktemp -d "${TMPDIR:-/tmp}/encryptor-install.XXXXXXXX")"
-    url="https://github.com/${REPO}/archive/${REF}.tar.gz"
-    say "Downloading ${url}"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --proto '=https' --tlsv1.2 "$url" -o "$WORK/src.tar.gz" || die "download failed"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q --https-only "$url" -O "$WORK/src.tar.gz" || die "download failed"
+    expected="${ENCRYPTOR_SHA256:-}"
+    if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        # A release: fetch the published tarball, the file SHA256SUMS describes.
+        asset="encryptor-${REF#v}.tar.gz"
+        base="https://github.com/${REPO}/releases/download/${REF}"
+        say "Downloading release ${REF}"
+        fetch "$base/$asset" "$WORK/src.tar.gz" || die "could not download $base/$asset (is ${REF} a published release?)"
+        if [[ -z "$expected" ]]; then
+            fetch "$base/SHA256SUMS" "$WORK/SHA256SUMS" || die "could not download $base/SHA256SUMS"
+            expected="$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1; exit }' "$WORK/SHA256SUMS")"
+            [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || die "SHA256SUMS of ${REF} has no entry for $asset"
+            warn "Checksum taken from the release itself: this detects corruption, not a compromised release."
+            warn "For an independent check pass ENCRYPTOR_SHA256=<value you obtained separately>."
+        fi
     else
-        die "curl or wget is required to download Encryptor"
+        url="https://github.com/${REPO}/archive/${REF}.tar.gz"
+        say "Downloading ${url}"
+        fetch "$url" "$WORK/src.tar.gz" || die "download failed"
     fi
     [[ -s "$WORK/src.tar.gz" ]] || die "downloaded archive is empty"
     actual="$(openssl dgst -sha256 -r "$WORK/src.tar.gz" | awk '{print $1}')"
-    if [[ -n "${ENCRYPTOR_SHA256:-}" ]]; then
-        [[ "${ENCRYPTOR_SHA256,,}" == "$actual" ]] || die "checksum mismatch: expected ${ENCRYPTOR_SHA256}, got ${actual}"
-        ok "Checksum verified"
+    if [[ -n "$expected" ]]; then
+        [[ "${expected,,}" == "$actual" ]] || die "checksum mismatch: expected ${expected}, got ${actual}"
+        ok "Checksum verified (${actual})"
     else
-        warn "No ENCRYPTOR_SHA256 given: integrity relies on HTTPS only. Archive SHA-256: ${actual}"
+        warn "Unpinned install of '${REF}': integrity relies on HTTPS only. Archive SHA-256: ${actual}"
+        warn "For a verified install use a release:  ENCRYPTOR_REF=vX.Y.Z"
     fi
     mkdir -p "$WORK/src"
     tar -xzf "$WORK/src.tar.gz" -C "$WORK/src" --strip-components=1 || die "could not unpack the archive"
@@ -131,7 +203,7 @@ LIB_DIR="$PREFIX/lib/encryptor"
 MAN_DIR="$PREFIX/share/man/man1"
 COMP_DIR="$PREFIX/share/bash-completion/completions"
 
-mkdir -p "$BIN_DIR" "$LIB_DIR" 2>/dev/null || die "cannot write to $PREFIX (set PREFIX, or run as a user who can)"
+install -d -m 755 "$BIN_DIR" "$LIB_DIR" 2>/dev/null || die "cannot write to $PREFIX (set PREFIX, or run as a user who can)"
 [[ -w "$BIN_DIR" && -w "$LIB_DIR" ]] || die "cannot write to $PREFIX (set PREFIX, or run as a user who can)"
 
 # Remove modules from previous versions that no longer exist.
@@ -147,12 +219,17 @@ done
 install -m 755 "$SRC/encryptor.sh" "$BIN_DIR/encryptor"
 ok "Installed $BIN_DIR/encryptor and ${#MODULES[@]} modules in $LIB_DIR"
 
-if [[ -f "$SRC/man/encryptor.1" ]] && mkdir -p "$MAN_DIR" 2>/dev/null; then
+if [[ -f "$SRC/man/encryptor.1" ]] && install -d -m 755 "$MAN_DIR" 2>/dev/null; then
     install -m 644 "$SRC/man/encryptor.1" "$MAN_DIR/encryptor.1" && ok "Installed man page"
 fi
-if mkdir -p "$COMP_DIR" 2>/dev/null && "$BIN_DIR/encryptor" completion bash > "$COMP_DIR/encryptor" 2>/dev/null; then
-    chmod 644 "$COMP_DIR/encryptor"; ok "Installed bash completion"
+# Generate the completion script into a temporary file first, so a failure
+# never leaves an empty file behind.
+comp_tmp="$(mktemp)"
+if "$BIN_DIR/encryptor" completion bash > "$comp_tmp" 2>/dev/null && [[ -s "$comp_tmp" ]] &&
+   install -d -m 755 "$COMP_DIR" 2>/dev/null && install -m 644 "$comp_tmp" "$COMP_DIR/encryptor"; then
+    ok "Installed bash completion"
 fi
+rm -f -- "$comp_tmp"
 
 # --- Verify -------------------------------------------------------------------
 say
@@ -169,3 +246,11 @@ case ":${PATH}:" in
         say "  ${B}export PATH=\"${BIN_DIR}:\$PATH\"${N}"
         say "or run it directly: ${B}${BIN_DIR}/encryptor${N}" ;;
 esac
+
+# An older copy earlier in PATH (2.x installed to /usr/local/bin) would keep
+# being run instead of this one.
+first="$(command -v encryptor 2>/dev/null || true)"
+if [[ -n "$first" && "$first" != "$BIN_DIR/encryptor" ]]; then
+    warn "Another encryptor comes first in your PATH: $first"
+    warn "Remove it (./uninstall.sh --prefix \"$(dirname "$(dirname "$first")")\") or adjust PATH, otherwise it will run instead of $BIN_DIR/encryptor."
+fi

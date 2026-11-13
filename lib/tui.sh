@@ -49,6 +49,11 @@ _tui_strength_line() {
     printf '  %sStrength%s  %s  %s%s%s %s(~%d bits)%s\n' "$C_MUTED" "$RESET" "$(ui_meter "$bits" 110 24 "$col")" "$col" "$label" "$RESET" "$C_MUTED" "$bits" "$RESET"
 }
 
+# Where to display a secret: the controlling terminal when stdout is not one.
+_tui_secret_sink() {
+    if [[ ! -t 1 ]] && { : > /dev/tty; } 2>/dev/null; then printf '/dev/tty'; else printf '/dev/stdout'; fi
+}
+
 # Ask for a NEW secret with confirmation, strength feedback and an optional
 # generator. Sets UI_REPLY. Returns 1 if the user gives up.
 tui_new_secret() {
@@ -62,11 +67,15 @@ tui_new_secret() {
             pw=$(crypto_generate_password 24) || { ui_err "Could not generate a password."; return 1; }
             echo
             UI_PANEL_COLOR="$C_WARN"
-            ui_panel "Generated password ${G_DOT} shown once" \
-                "" \
-                "    ${BOLD}${C_KEY}${pw}${RESET}" \
-                "" \
-                "${C_MUTED}24 random characters (~142 bits). Store it in your password manager now.${RESET}"
+            # Shown on the terminal itself when there is one, so that it never
+            # ends up in a file or pipe the output was redirected to.
+            {
+                ui_panel "Generated password ${G_DOT} shown once" \
+                    "" \
+                    "    ${BOLD}${C_KEY}${pw}${RESET}" \
+                    "" \
+                    "${C_MUTED}24 random characters (~142 bits). Store it in your password manager now.${RESET}"
+            } > "$(_tui_secret_sink)"
             if ui_confirm "I have saved it" n; then UI_REPLY="$pw"; return 0; fi
             continue
         fi
@@ -90,6 +99,12 @@ tui_new_secret() {
 _tui_resolve_output() {
     local out="$1" rc
     while [[ -e "$out" ]]; do
+        if [[ -d "$out" ]]; then
+            ui_err "$(ui_safe "$out") is a directory."
+            ui_prompt_path "Output file path" || return 1
+            [[ -n "$UI_REPLY" ]] || return 1
+            out="$UI_REPLY"; continue
+        fi
         UI_SEL_HEADER="$(tui_header "Output file")"
         ui_select "$(ui_pathfit "$out") already exists" \
             "o|Overwrite it|" \
@@ -128,7 +143,7 @@ _tui_pick_recipients() {
             [[ "${PKI_INFO[status]}" == "expired" ]]  && status="  ${G_DOT} EXPIRED"
             [[ "${PKI_INFO[status]}" == "expiring" ]] && status="  ${G_DOT} expires in ${PKI_INFO[days_left]}d"
             hint="${PKI_INFO[cn]}  ${G_DOT} $(_pki_key_short)${status}"
-            ui_sel_add "$f" "$mark $(basename "$f")" "$hint"
+            ui_sel_add "$f" "$mark $(ui_base "$f")" "$hint"
         done
         ui_sel_sep
         ui_sel_add "@path" "Add a certificate from a path${G_ELLIPSIS}" ""
@@ -156,7 +171,7 @@ _tui_pick_recipients() {
                 if (( was )); then TUI_RECIPIENTS=("${keep[@]:-}"); [[ -z "${TUI_RECIPIENTS[0]:-}" ]] && TUI_RECIPIENTS=()
                 else
                     if openssl x509 -in "$f" -noout -checkend 0 >/dev/null 2>&1; then TUI_RECIPIENTS+=("$f")
-                    else ui_err "$(basename "$f") has expired and cannot be used."; ui_pause; fi
+                    else ui_err "$(ui_base "$f") has expired and cannot be used."; ui_pause; fi
                 fi ;;
         esac
     done
@@ -226,7 +241,7 @@ tui_encrypt() {
     if (( rc != 0 )); then
         log_operation "ERROR" "Encrypt failed: $in — $ENC_ERR"
         UI_PANEL_COLOR="$C_ERR"
-        ui_panel "$G_ERR Encryption failed" "$ENC_ERR" "${C_MUTED}The original file was not changed.${RESET}"
+        ui_panel "$G_ERR Encryption failed" "$(ui_safe "$ENC_ERR")" "${C_MUTED}The original file was not changed.${RESET}"
         crypto_reset_inputs; ui_pause; return 0
     fi
     local keyline
@@ -265,16 +280,37 @@ _tui_delete_original() {
         fi
         ui_ok "Encrypted copy verified with your password."
     else
+        # Open the copy with one of the recipients' private keys if we hold it.
+        local own=""
         if ! crypto_inspect "$out"; then ui_err "The encrypted copy looks invalid — the original was NOT deleted."; return 1; fi
-        ui_warn "The copy can only be opened by the recipients' private keys, so it cannot be test-decrypted here."
-        ui_confirm "Delete the original anyway?" n || { ui_note "Original file kept."; return 0; }
+        if own=$(_tui_find_own_key); then
+            crypto_reset_inputs
+            ENC_KEY_FILE="$own"
+            [[ -f "${own%.key}.pem" ]] && ENC_CERT_FILE="${own%.key}.pem"
+            if crypto_key_is_encrypted "$own"; then
+                ui_prompt_secret "Passphrase for $(ui_base "$own") (to verify the encrypted copy)" || { ui_note "Original file kept."; return 0; }
+                ENC_KEY_SECRET="$UI_REPLY"
+            fi
+            TUI_ACTIVE=1; crypto_verify "$out"; rc=$?; TUI_ACTIVE=0; ui_spinner_stop
+            if (( rc != 0 )); then
+                ui_err "Verification of the encrypted copy failed — the original was NOT deleted. ($(ui_safe "$ENC_ERR"))"
+                return 1
+            fi
+            ui_ok "Encrypted copy verified with your key $(ui_base "$own")."
+        else
+            ui_warn "None of the recipients' private keys is in your store, so the encrypted copy"
+            ui_note "  cannot be test-opened here. If it is unusable, deleting the original loses the data."
+            ui_prompt "Type DELETE to delete the original anyway" "" || { ui_note "Original file kept."; return 0; }
+            [[ "$UI_REPLY" == "DELETE" ]] || { ui_note "Original file kept."; return 0; }
+        fi
     fi
+    if same_file "$in" "$out"; then ui_err "Input and output are the same file — nothing deleted."; return 1; fi
     if secure_delete "$in"; then
         ui_ok "Original deleted ${C_MUTED}(${SECURE_DELETE_METHOD})${RESET}"
         ui_note "On SSDs and copy-on-write / journaling filesystems old blocks may survive an overwrite."
         log_operation "INFO" "Original securely deleted: $in"
     else
-        ui_err "$ENC_ERR"
+        ui_err "$(ui_safe "$ENC_ERR")"
     fi
 }
 
@@ -316,7 +352,7 @@ _tui_recipient_name() {
         have=$(crypto_cert_fingerprint "$f") || continue
         if [[ "$have" == "$fp" ]]; then
             local note=""; [[ -f "${f%.pem}.key" ]] && note="  ${C_OK}(you hold the key)${RESET}"
-            printf '%s%s' "$(basename "$f")" "$note"; return
+            printf '%s%s' "$(ui_base "$f")" "$note"; return
         fi
     done
     printf '%s%s%s%s' "$C_MUTED" "${fp:0:16}" "$G_ELLIPSIS" "$RESET"
@@ -344,9 +380,10 @@ _tui_collect_credentials() {
             ui_prompt_secret "Password" || return 1
             ENC_SECRET="$UI_REPLY" ;;
         v3:recipient|legacy-smime:*)
+            [[ "${ENC_META[format]}" == "legacy-smime" ]] && ENC_ALLOW_LEGACY=1      # accepted in tui_decrypt
             local key=""
             if [[ "${ENC_META[format]}" == "v3" ]] && key=$(_tui_find_own_key); then
-                ui_info "Using your key $(basename "$key") (it matches a recipient of this file)."
+                ui_info "Using your key $(ui_base "$key") (it matches a recipient of this file)."
             else
                 cert_ui_pick "Private key to decrypt with" key || return 1
                 key="$UI_CHOICE"
@@ -355,11 +392,12 @@ _tui_collect_credentials() {
             ENC_KEY_FILE="$key"
             [[ -f "${key%.key}.pem" ]] && ENC_CERT_FILE="${key%.key}.pem"
             if crypto_key_is_encrypted "$key"; then
-                ui_prompt_secret "Passphrase for $(basename "$key")" || return 1
+                ui_prompt_secret "Passphrase for $(ui_base "$key")" || return 1
                 ENC_KEY_SECRET="$UI_REPLY"
             fi ;;
         legacy-enc:*)
             ui_warn "Legacy file: the algorithm was not stored, and the content cannot be authenticated."
+            ENC_ALLOW_LEGACY=1      # the user accepted this explicitly (see tui_decrypt)
             local c
             ui_sel_reset
             for c in "${ENC_CIPHER_IDS[@]}"; do ui_sel_add "$c" "$c" ""; done
@@ -388,12 +426,24 @@ tui_decrypt() {
     tui_screen "Decrypt"
     if ! crypto_inspect "$in"; then
         UI_PANEL_COLOR="$C_ERR"
-        ui_panel "$G_ERR Cannot decrypt" "$ENC_ERR"
+        ui_panel "$G_ERR Cannot decrypt" "$(ui_safe "$ENC_ERR")"
         ui_pause; return 0
     fi
     _tui_describe "$in"
     ui_panel "Detected" "${TUI_DESC[@]}"
     echo
+    if [[ "${ENC_META[format]}" == legacy-* ]]; then
+        # Never slide into the unauthenticated path silently: a file that was
+        # swapped for a 2.x-style one must not look like a normal decryption.
+        UI_PANEL_COLOR="$C_WARN"
+        ui_panel "$G_WARN Not authenticated" \
+            "This is an Encryptor 2.x file. It carries no authentication tag, so there is" \
+            "no way to tell whether it was modified or replaced. Decrypt it only if you" \
+            "created it yourself or fully trust where it came from."
+        echo
+        ui_confirm "Decrypt this unauthenticated file anyway?" n || return 0
+        tui_screen "Decrypt" "$(ui_pathfit "$in")"
+    fi
 
     local def="${in}.dec"
     [[ "$in" == *.enc ]] && def="${in%.enc}"
@@ -413,7 +463,7 @@ tui_decrypt() {
         t1=$(now_ms)
         (( rc == 0 )) && break
         log_operation "ERROR" "Decrypt failed: $in — $ENC_ERR"
-        ui_err "$ENC_ERR"
+        ui_err "$(ui_safe "$ENC_ERR")"
         if (( rc != EX_AUTH || attempt == 3 )); then
             ui_note "No output was written."
             crypto_reset_inputs; ui_pause; return 0
@@ -438,8 +488,9 @@ tui_decrypt() {
         ui_info "Tip: re-encrypt this file to upgrade it to the authenticated ENCRYPTOR/3 format."
     fi
     echo
-    if ui_confirm "Delete the encrypted file $(basename "$in")?" n; then
-        rm -f -- "$in" "${in}.sha256" && ui_ok "Encrypted file removed."
+    if ui_confirm "Delete the encrypted file $(ui_base "$in")?" n; then
+        rm -f -- "$in" && ui_ok "Encrypted file removed."
+        [[ "${ENC_META[format]}" == "legacy-enc" ]] && rm -f -- "${in}.sha256"
         log_operation "INFO" "Encrypted file removed: $in"
     fi
     ui_pause
@@ -453,7 +504,7 @@ tui_inspect() {
     tui_screen "Inspect & verify"
     if ! crypto_inspect "$in"; then
         UI_PANEL_COLOR="$C_WARN"
-        ui_panel "$G_WARN Not an Encryptor file" "$ENC_ERR"
+        ui_panel "$G_WARN Not an Encryptor file" "$(ui_safe "$ENC_ERR")"
         ui_pause; return 0
     fi
     _tui_describe "$in"
@@ -469,7 +520,7 @@ tui_inspect() {
         if _tui_collect_credentials; then
             TUI_ACTIVE=1; crypto_verify "$in"; rc=$?; TUI_ACTIVE=0; ui_spinner_stop
             if (( rc == 0 )); then ui_ok "${BOLD}Authentic${RESET} — the file is intact and your credentials are correct."
-            else ui_err "$ENC_ERR"; fi
+            else ui_err "$(ui_safe "$ENC_ERR")"; fi
             log_operation "INFO" "Verify: $in → rc=$rc"
         fi
         crypto_reset_inputs

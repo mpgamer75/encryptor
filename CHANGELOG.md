@@ -33,6 +33,21 @@ written by 2.x remain readable.
   encrypted as a stream (constant memory). Replaces the `openssl smime` path,
   which failed silently on OpenSSL 3, corrupted binary files, and needed RAM
   proportional to the file size.
+- **Independent security review** (three reviewers; record in
+  `docs/SECURITY-REVIEW.md`). Its high and medium findings are all fixed in
+  this release, notably:
+  - decryption reads the file once and releases output only if the tag over
+    the decrypted bytes is correct (no verify/decrypt window);
+  - 2.x files are refused unless `--legacy` is given (no silent downgrade);
+  - input and output are compared by identity, so `--shred` can no longer
+    destroy a file encrypted onto itself;
+  - cost parameters in a header are bounded before any work;
+  - secrets that OpenSSL would truncate are refused;
+  - untrusted text is filtered before display; certificate facts are read
+    from extensions and the public key, not from text searches;
+  - the installer no longer trusts files beside it and verifies releases;
+  - key files and PKCS#12 bundles use 600,000 PBKDF2 iterations;
+  - the audit no longer reports false passes.
 - **Strict input validation.** Cipher allow-list (`--algo none` is refused),
   bounded iteration counts, safe store names, escaped certificate subjects,
   validated TLS scan targets, sanitised log lines, RFC 8259 JSON escaping.
@@ -103,12 +118,13 @@ written by 2.x remain readable.
 ### Migration
 
 1. Upgrade.
-2. `encryptor audit` in directories holding encrypted files lists legacy ones.
-3. Decrypt each legacy file (`--algo`, and `--legacy-iter 100000` for 2.0
-   files) and encrypt it again.
-4. Scripts: `--encrypt/--decrypt FILE --pass-file … --output …` keeps working.
-   Check anything that relied on the `.dec` suffix, on `.sha256` files, or on
-   silent overwriting.
+2. `encryptor audit` in directories holding encrypted files counts legacy ones.
+3. Decrypt each legacy file with `--legacy` (plus `--algo`, and
+   `--legacy-iter 100000` for 2.0 files) and encrypt it again.
+4. Scripts: `--encrypt/--decrypt FILE --pass-file … --output …` keeps working
+   for new files. Check anything that relied on the `.dec` suffix, on
+   `.sha256` files, on silent overwriting, or on decrypting 2.x files without
+   `--legacy`.
 
 ---
 

@@ -1,3 +1,15 @@
 #!/bin/sh
 set -e
+
+# Encryptor 2.x installed itself to /usr/local/bin, which comes before
+# /usr/bin in the default PATH: the old, unauthenticated version would keep
+# being run instead of this package.
+if [ "$1" = "configure" ]; then
+    for old in /usr/local/bin/encryptor; do
+        if [ -e "$old" ]; then
+            echo "encryptor: WARNING: an older copy exists at $old and takes precedence over /usr/bin/encryptor." >&2
+            echo "encryptor: remove it (and /usr/local/lib/encryptor) so that this version is the one that runs." >&2
+        fi
+    done
+fi
 exit 0

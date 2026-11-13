@@ -8,9 +8,23 @@ URL:            https://github.com/mpgamer75/encryptor
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
+# %%install generates the completion script and %%check runs the test suite.
+BuildRequires:  bash >= 4.4
+BuildRequires:  openssl >= 1.1.1
+BuildRequires:  coreutils
+BuildRequires:  findutils
+BuildRequires:  sed
+BuildRequires:  grep
+BuildRequires:  gawk
+BuildRequires:  tar
+BuildRequires:  gzip
 Requires:       bash >= 4.4
 Requires:       openssl >= 1.1.1
 Requires:       coreutils
+Requires:       findutils
+Requires:       sed
+Requires:       grep
+Requires:       gawk
 Recommends:     less
 Suggests:       git
 

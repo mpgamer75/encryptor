@@ -13,6 +13,7 @@ declare -A PKI_KEY_LABEL=(
     [rsa3072]="RSA 3072-bit" [rsa4096]="RSA 4096-bit"
 )
 readonly PKI_EXPIRY_WARN_DAYS=30
+readonly PKI_KEY_KDF_ITER=600000     # PBKDF2 iterations protecting key files and PKCS#12 bundles
 
 declare -A PKI_INFO=()
 
@@ -33,13 +34,41 @@ _pki_conf_escape() {
 
 pki_valid_text() {    # free-text DN component: 1-64 chars, no control characters
     local s="$1"
-    [[ -n "$s" && ${#s} -le 64 && "$s" != *[$'\001'-$'\037'$'\177']* ]]
+    [[ -n "$s" && ${#s} -le 64 ]] || return 1
+    # ui_safe replaces C0, DEL, C1 and line-separator characters: a value it
+    # would change contains something that must not go into a certificate.
+    [[ "$(ui_safe "$s")" == "$s" ]]
 }
 pki_valid_country() { [[ "$1" =~ ^[A-Za-z]{2}$ ]]; }
 pki_valid_email()   { [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]]; }
 pki_valid_dns()     { [[ "$1" =~ ^(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]]; }
-pki_valid_ip()      { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$1" =~ ^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*$ ]]; }
-pki_valid_days()    { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( $1 >= 1 && $1 <= 36500 )); }
+pki_valid_ip() {
+    local ip="$1" o
+    if [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        for o in "${BASH_REMATCH[@]:1}"; do (( 10#$o <= 255 )) || return 1; done
+        return 0
+    fi
+    [[ "$ip" =~ ^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*$ && ${#ip} -le 39 ]]
+}
+# Numbers are always read in base 10 ("030" is thirty, not octal).
+pki_valid_days()    { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 36500 )); }
+
+# Facts about a certificate or CSR are taken from fields OpenSSL prints on
+# their own, or from the public key itself — never from a text search that a
+# crafted subject name could satisfy.
+pki_is_ca() {      # basicConstraints CA:TRUE
+    openssl x509 -in "$1" -noout -text 2>/dev/null \
+        | awk 'seen == 1 { if ($0 ~ /CA:TRUE/) found = 1; seen = 2 } /^ +X509v3 Basic Constraints:/ && !seen { seen = 1 } END { exit !found }'
+}
+_pki_ext_value() { # _pki_ext_value CERT "X509v3 Key Usage" → the value line, trimmed
+    openssl x509 -in "$1" -noout -text 2>/dev/null \
+        | awk -v name="$2" 'seen == 1 { sub(/^ +/, ""); print; seen = 2 } $0 ~ "^ +" name ":" && !seen { seen = 1 }'
+}
+_pki_csr_is_ec() {
+    local text
+    text=$(openssl req -in "$1" -noout -pubkey 2>/dev/null | openssl pkey -pubin -noout -text 2>/dev/null)
+    grep -Eq '^(ASN1 OID|NIST CURVE)' <<<"$text"
+}
 
 # Build a subjectAltName value from a comma-separated user list.
 # Entries: DNS names, IP addresses, e-mail addresses. Prints "DNS:a,IP:b,email:c".
@@ -71,7 +100,14 @@ pki_generate_key() {
     esac
     local rc
     if [[ -n "$secret" ]]; then
-        ( umask 077; openssl genpkey "${args[@]}" -aes-256-cbc -pass fd:3 -out "$out" 3< <(printf '%s\n' "$secret") ) >/dev/null 2>&1; rc=$?
+        crypto_check_secret "$secret" "Key passphrase" || return "$EX_USAGE"
+        # The key travels over a pipe into PKCS#8 encryption with AES-256 and
+        # PBKDF2-HMAC-SHA256 at 600,000 iterations (genpkey's own -aes-256-cbc
+        # would use only 2,048).
+        ( umask 077
+          openssl genpkey "${args[@]}" 2>/dev/null \
+            | openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter "$PKI_KEY_KDF_ITER" \
+                -passout fd:3 -out "$out" 3< <(printf '%s\n' "$secret") ) >/dev/null 2>&1; rc=$?
     else
         ( umask 077; openssl genpkey "${args[@]}" -out "$out" ) >/dev/null 2>&1; rc=$?
     fi
@@ -144,6 +180,7 @@ pki_create_identity() {
     pki_valid_text "$cn" || { ENC_ERR="Invalid common name."; return "$EX_USAGE"; }
     [[ -z "$email" ]] || pki_valid_email "$email" || { ENC_ERR="Invalid e-mail address."; return "$EX_USAGE"; }
     pki_valid_days "$days" || { ENC_ERR="Validity must be 1–36500 days."; return "$EX_USAGE"; }
+    days=$(( 10#$days ))
 
     local key="$CERT_DIR/$name.key" cert="$CERT_DIR/$name.pem" is_ec=0 san=""
     _pki_is_ec_type "$type" && is_ec=1
@@ -172,6 +209,7 @@ pki_create_ca() {
     [[ -z "$org" ]] || pki_valid_text "$org" || { ENC_ERR="Invalid organization name."; return "$EX_USAGE"; }
     [[ -z "$country" ]] || pki_valid_country "$country" || { ENC_ERR="Country must be a 2-letter code (e.g. FR, US)."; return "$EX_USAGE"; }
     pki_valid_days "$days" || { ENC_ERR="Validity must be 1–36500 days."; return "$EX_USAGE"; }
+    days=$(( 10#$days ))
 
     local key="$CERT_DIR/$name.key" cert="$CERT_DIR/$name.pem" is_ec=0
     _pki_is_ec_type "$type" && is_ec=1
@@ -225,9 +263,32 @@ pki_sign_csr() {
     done
     case "$profile" in identity|server|client) ;; *) ENC_ERR="Unknown profile: $profile"; return "$EX_USAGE" ;; esac
     pki_valid_days "$days" || { ENC_ERR="Validity must be 1–36500 days."; return "$EX_USAGE"; }
-    openssl req -in "$csr" -noout -verify >/dev/null 2>&1 || { ENC_ERR="The CSR is invalid or its signature does not verify."; return "$EX_FAIL"; }
-    if ! openssl x509 -in "$ca_cert" -noout -text 2>/dev/null | grep -q 'CA:TRUE'; then
-        ENC_ERR="$(basename "$ca_cert") is not a CA certificate (basicConstraints CA:TRUE missing)."; return "$EX_FAIL"
+    days=$(( 10#$days ))
+    # `openssl req -verify` exits 0 even for a bad signature on OpenSSL 3.0:
+    # rely on its message, not its status.
+    local csr_check; csr_check=$(openssl req -in "$csr" -noout -verify 2>&1)
+    if [[ "$csr_check" != *"verify OK"* ]]; then
+        ENC_ERR="The CSR is invalid or its signature does not verify."; return "$EX_FAIL"
+    fi
+    if ! pki_is_ca "$ca_cert"; then
+        ENC_ERR="$(ui_base "$ca_cert") is not a CA certificate (basicConstraints CA:TRUE missing)."; return "$EX_FAIL"
+    fi
+    if ! openssl x509 -in "$ca_cert" -noout -checkend 0 >/dev/null 2>&1; then
+        ENC_ERR="The CA certificate $(ui_base "$ca_cert") has expired."; return "$EX_FAIL"
+    fi
+    local ca_ku; ca_ku=$(_pki_ext_value "$ca_cert" "X509v3 Key Usage")
+    if [[ -n "$ca_ku" && "$ca_ku" != *"Certificate Sign"* ]]; then
+        ENC_ERR="The CA certificate's key usage ($ca_ku) does not allow signing certificates."; return "$EX_FAIL"
+    fi
+    # A certificate that outlives its issuer cannot be validated after the
+    # issuer expires.
+    local ca_end ca_left
+    ca_end=$(openssl x509 -in "$ca_cert" -noout -enddate 2>/dev/null); ca_end=$(core_date_epoch "${ca_end#*=}")
+    if [[ -n "$ca_end" ]]; then
+        ca_left=$(( (ca_end - $(date -u +%s)) / 86400 ))
+        if (( days > ca_left )); then
+            ENC_ERR="The CA itself expires in ${ca_left} days: choose a validity of at most ${ca_left} days."; return "$EX_USAGE"
+        fi
     fi
     local san=""
     if [[ -n "$san_list" ]]; then
@@ -239,7 +300,8 @@ pki_sign_csr() {
     [[ -e "$out" ]] && { ENC_ERR="$out already exists."; return "$EX_CANTCREAT"; }
 
     local is_ec=0
-    openssl req -in "$csr" -noout -text 2>/dev/null | grep -q 'Public Key Algorithm: id-ecPublicKey' && is_ec=1
+    _pki_csr_is_ec "$csr" && is_ec=1
+    if [[ -n "$secret" ]]; then crypto_check_secret "$secret" "CA key passphrase" || return "$EX_USAGE"; fi
     core_tmpdir
     local cnf="$TEMP_DIR/pki.cnf" serial rc
     _pki_write_config "$cnf" "$is_ec" "unused" "" "" "" "$san"
@@ -261,50 +323,50 @@ pki_sign_csr() {
 }
 
 # --- Certificate information ------------------------------------------------
-# Portable "notAfter" → epoch seconds.
-_pki_date_epoch() {
-    local d="$1" e
-    e=$(date -u -d "$d" +%s 2>/dev/null) || e=$(date -u -j -f '%b %d %T %Y %Z' "$d" +%s 2>/dev/null) || e=""
-    printf '%s' "$e"
-}
-
 # pki_cert_info FILE → PKI_INFO[subject|issuer|cn|not_before|not_after|days_left|
 #   status|key_algo|key_bits|sig_algo|fingerprint|serial|is_ca|self_signed|usage]
 pki_cert_info() {
-    local file="$1" basic text line
+    local file="$1" text hashes kinfo
     PKI_INFO=()
-    basic=$(openssl x509 -in "$file" -noout -subject -issuer -startdate -enddate -serial -fingerprint -sha256 \
-              -nameopt utf8,sep_comma_plus_space 2>/dev/null) || return 1
-    [[ -n "$basic" ]] || return 1
-    while IFS= read -r line; do
-        case "$line" in
-            subject=*)     PKI_INFO[subject]=$(trim "${line#subject=}") ;;
-            issuer=*)      PKI_INFO[issuer]=$(trim "${line#issuer=}") ;;
-            notBefore=*)   PKI_INFO[not_before]="${line#notBefore=}" ;;
-            notAfter=*)    PKI_INFO[not_after]="${line#notAfter=}" ;;
-            serial=*)      PKI_INFO[serial]="${line#serial=}" ;;
-            *Fingerprint=*) PKI_INFO[fingerprint]="${line#*=}" ;;
-        esac
-    done <<<"$basic"
+    openssl x509 -in "$file" -noout >/dev/null 2>&1 || return 1
+
+    # Each field is queried on its own and only its first line is used, with
+    # control characters escaped by OpenSSL (esc_ctrl) and then by ui_safe:
+    # a crafted name cannot inject a fake "issuer=" line or terminal escapes.
+    _pki_field() { openssl x509 -in "$file" -noout "$1" -nameopt utf8,esc_ctrl,sep_comma_plus_space 2>/dev/null | sed -n '1p'; }
+    local v
+    v=$(_pki_field -subject);     PKI_INFO[subject]=$(ui_safe "$(trim "${v#subject=}")")
+    v=$(_pki_field -issuer);      PKI_INFO[issuer]=$(ui_safe "$(trim "${v#issuer=}")")
+    v=$(_pki_field -startdate);   PKI_INFO[not_before]=$(ui_safe "${v#notBefore=}")
+    v=$(_pki_field -enddate);     PKI_INFO[not_after]=$(ui_safe "${v#notAfter=}")
+    v=$(_pki_field -serial);      PKI_INFO[serial]=$(ui_safe "${v#serial=}")
+    v=$(openssl x509 -in "$file" -noout -fingerprint -sha256 2>/dev/null | sed -n '1p')
+    PKI_INFO[fingerprint]=$(ui_safe "${v#*=}")
+    unset -f _pki_field
+
     local cn="${PKI_INFO[subject]}"
     if [[ "$cn" == *CN=* ]]; then cn="${cn##*CN=}"; cn="${cn%%, *}"; fi
     PKI_INFO[cn]="$cn"
 
+    # Key type and size from the public key itself.
+    kinfo=$(crypto_cert_key_info "$file") || kinfo="other 0"
+    PKI_INFO[key_type]=${kinfo% *}
+    PKI_INFO[key_bits]=${kinfo#* }
     text=$(openssl x509 -in "$file" -noout -text 2>/dev/null)
-    PKI_INFO[key_algo]=$(sed -n 's/^ *Public Key Algorithm: *//p' <<<"$text" | head -n 1)
-    PKI_INFO[key_bits]=$(sed -n 's/^ *\(RSA \)\{0,1\}Public-Key: (\([0-9]*\) bit).*/\2/p' <<<"$text" | head -n 1)
-    PKI_INFO[sig_algo]=$(sed -n 's/^ *Signature Algorithm: *//p' <<<"$text" | head -n 1)
-    PKI_INFO[usage]=$(grep -A1 'X509v3 Key Usage' <<<"$text" | tail -n 1 | sed 's/^ *//')
-    PKI_INFO[eku]=$(grep -A1 'X509v3 Extended Key Usage' <<<"$text" | tail -n 1 | sed 's/^ *//')
-    PKI_INFO[san]=$(grep -A1 'X509v3 Subject Alternative Name' <<<"$text" | tail -n 1 | sed 's/^ *//')
-    grep -q 'X509v3 Key Usage' <<<"$text" || PKI_INFO[usage]=""
-    grep -q 'X509v3 Extended Key Usage' <<<"$text" || PKI_INFO[eku]=""
-    grep -q 'X509v3 Subject Alternative Name' <<<"$text" || PKI_INFO[san]=""
-    if grep -q 'CA:TRUE' <<<"$text"; then PKI_INFO[is_ca]=1; else PKI_INFO[is_ca]=0; fi
-    if [[ "${PKI_INFO[subject]}" == "${PKI_INFO[issuer]}" ]]; then PKI_INFO[self_signed]=1; else PKI_INFO[self_signed]=0; fi
+    PKI_INFO[key_algo]=$(sed -n 's/^ \{1,\}Public Key Algorithm: *//p' <<<"$text" | sed -n '1p')
+    PKI_INFO[sig_algo]=$(sed -n 's/^ \{1,\}Signature Algorithm: *//p' <<<"$text" | sed -n '1p')
+    PKI_INFO[sig_hash]=$(sed -n 's/^ \{1,\}Hash Algorithm: *//p' <<<"$text" | sed -n '1p')     # RSA-PSS
+    PKI_INFO[usage]=$(_pki_ext_value "$file" "X509v3 Key Usage")
+    PKI_INFO[eku]=$(_pki_ext_value "$file" "X509v3 Extended Key Usage")
+    PKI_INFO[san]=$(ui_safe "$(_pki_ext_value "$file" "X509v3 Subject Alternative Name")")
+    if pki_is_ca "$file"; then PKI_INFO[is_ca]=1; else PKI_INFO[is_ca]=0; fi
+    # Self-signed = issuer and subject are the same name (compared by hash,
+    # not by their display strings).
+    hashes=$(openssl x509 -in "$file" -noout -subject_hash -issuer_hash 2>/dev/null | tr '\n' ' ')
+    if [[ -n "$hashes" && "${hashes%% *}" == "$(awk '{print $2}' <<<"$hashes")" ]]; then PKI_INFO[self_signed]=1; else PKI_INFO[self_signed]=0; fi
 
     local end now
-    end=$(_pki_date_epoch "${PKI_INFO[not_after]}")
+    end=$(core_date_epoch "${PKI_INFO[not_after]}")
     if [[ -n "$end" ]]; then
         now=$(date -u +%s)
         PKI_INFO[days_left]=$(( (end - now) / 86400 ))
@@ -320,22 +382,30 @@ pki_cert_info() {
 
 # Findings about a certificate's cryptographic strength (one per line).
 pki_cert_findings() {
-    local bits="${PKI_INFO[key_bits]:-0}" algo="${PKI_INFO[key_algo]:-}" sig="${PKI_INFO[sig_algo]:-}"
+    local bits="${PKI_INFO[key_bits]:-0}" type="${PKI_INFO[key_type]:-other}" algo="${PKI_INFO[key_algo]:-}"
+    local sig="${PKI_INFO[sig_algo]:-}" hash="${PKI_INFO[sig_hash]:-}"
     [[ "$bits" =~ ^[0-9]+$ ]] || bits=0
-    case "$algo" in
-        rsaEncryption)
+    case "$type" in
+        rsa)
             if   (( bits < 2048 )); then echo "fail|RSA key is only ${bits} bits — below the 2048-bit minimum."
             elif (( bits < 3072 )); then echo "warn|RSA ${bits}-bit: acceptable today; 3072+ recommended for long-lived keys."
             else echo "pass|RSA ${bits}-bit key."; fi ;;
-        id-ecPublicKey)
-            if (( bits < 256 )); then echo "fail|EC key is only ${bits} bits."; else echo "pass|EC ${bits}-bit key."; fi ;;
-        *) echo "info|Key algorithm: ${algo:-unknown}" ;;
+        ec)
+            if (( bits < 224 )); then echo "fail|EC key is only ${bits} bits."; else echo "pass|EC ${bits}-bit key."; fi ;;
+        *)
+            case "${algo,,}" in
+                *dsa*) echo "fail|DSA keys are obsolete — replace this certificate." ;;
+                *ed25519*|*ed448*) echo "pass|${algo} key." ;;
+                *) echo "warn|Unrecognised key algorithm (${algo:-unknown}): strength not assessed." ;;
+            esac ;;
     esac
-    case "${sig,,}" in
-        *md5*|*md2*) echo "fail|Signature uses MD5 — broken, replace this certificate." ;;
-        *sha1*)      echo "fail|Signature uses SHA-1 — deprecated, replace this certificate." ;;
-        *sha256*|*sha384*|*sha512*|*ed25519*|*ed448*) echo "pass|Signature algorithm: $sig" ;;
-        *) echo "info|Signature algorithm: ${sig:-unknown}" ;;
+    # For RSA-PSS the hash is a separate parameter.
+    local sigdesc="${sig,,} ${hash,,}"
+    case "$sigdesc" in
+        *md5*|*md2*|*md4*) echo "fail|Signature uses MD5 — broken, replace this certificate." ;;
+        *sha1*)            echo "fail|Signature uses SHA-1 — deprecated, replace this certificate." ;;
+        *sha224*|*sha256*|*sha384*|*sha512*|*sha3*|*ed25519*|*ed448*) echo "pass|Signature algorithm: ${sig}${hash:+ ($hash)}" ;;
+        *) echo "warn|Unrecognised signature algorithm (${sig:-unknown}): strength not assessed." ;;
     esac
     case "${PKI_INFO[status]}" in
         expired)  echo "fail|Certificate has EXPIRED (${PKI_INFO[not_after]})." ;;
@@ -364,6 +434,7 @@ pki_match() {
 
 pki_verify_chain() { openssl verify -CAfile "$2" "$1" >/dev/null 2>&1; }
 
+PKI_P12_ITER=0      # PBKDF2 iterations used by the last PKCS#12 export
 # --- PKCS#12 export ---------------------------------------------------------
 # pki_export_p12 CERT KEY OUT EXPORT_PASSWORD [KEY_PASSPHRASE]
 # Always AES-256-CBC + PBKDF2 with a SHA-256 MAC (OpenSSL 1.1.1 would otherwise
@@ -372,9 +443,19 @@ pki_export_p12() {
     local cert="$1" key="$2" out="$3" secret="$4" key_secret="${5:-}" rc
     ENC_ERR=""
     [[ -n "$secret" ]] || { ENC_ERR="An export password is required."; return "$EX_USAGE"; }
+    crypto_check_secret "$secret" "Export password" || return "$EX_USAGE"
+    if [[ -n "$key_secret" ]]; then crypto_check_secret "$key_secret" "Key passphrase" || return "$EX_USAGE"; fi
     [[ -e "$out" ]] && { ENC_ERR="$out already exists."; return "$EX_CANTCREAT"; }
     local -a args=(pkcs12 -export -in "$cert" -inkey "$key" -out "$out" -name "$(basename "${cert%.*}")"
                    -keypbe AES-256-CBC -certpbe AES-256-CBC -macalg sha256 -passout fd:3)
+    # OpenSSL 3.x can raise the PBKDF2 work factor of the bundle; 1.1.1 has no
+    # such option and always uses 2,048 iterations. Report what was really used.
+    local help; help=$(openssl pkcs12 -help 2>&1)
+    if [[ "$help" == *" -iter "* ]]; then
+        args+=(-iter "$PKI_KEY_KDF_ITER"); PKI_P12_ITER=$PKI_KEY_KDF_ITER
+    else
+        PKI_P12_ITER=2048
+    fi
     if [[ -n "$key_secret" ]]; then
         ( umask 077; openssl "${args[@]}" -passin fd:4 3< <(printf '%s\n' "$secret") 4< <(printf '%s\n' "$key_secret") ) >/dev/null 2>&1; rc=$?
     else
@@ -462,7 +543,7 @@ pki_report_text() {
         elif ! openssl x509 -in "$f" -noout -checkend $(( warn_days * 86400 )) >/dev/null 2>&1; then st="expiring"; col="$C_WARN"; mark="$G_WARN"; bad=1; fi
         days="${PKI_INFO[days_left]:-?}"
         printf '%-28s %-8s %-14s %-12s %s%s %s%s\n' \
-            "$(ui_fit "$(basename "$f" .pem)" 28)" \
+            "$(ui_fit "$(ui_base "${f%.pem}")" 28)" \
             "$([[ "${PKI_INFO[is_ca]}" == 1 ]] && echo CA || echo leaf)" \
             "$(_pki_key_short)" "${days} days" "$col" "$mark" "$st" "$RESET"
     done
@@ -471,11 +552,26 @@ pki_report_text() {
 }
 
 _pki_key_short() {
-    case "${PKI_INFO[key_algo]:-}" in
-        rsaEncryption)  printf 'RSA %s' "${PKI_INFO[key_bits]}" ;;
-        id-ecPublicKey) printf 'EC P-%s' "${PKI_INFO[key_bits]}" ;;
-        *)              printf '%s' "${PKI_INFO[key_algo]:-?}" ;;
+    case "${PKI_INFO[key_type]:-}" in
+        rsa) printf 'RSA %s' "${PKI_INFO[key_bits]}" ;;
+        ec)  printf 'EC P-%s' "${PKI_INFO[key_bits]}" ;;
+        *)   printf '%s' "$(ui_safe "${PKI_INFO[key_algo]:-?}")" ;;
     esac
+}
+
+# Subject and key of a CSR, for confirmation before signing. Sets PKI_CSR_SUBJECT
+# and PKI_CSR_KEY.
+PKI_CSR_SUBJECT=""; PKI_CSR_KEY=""
+pki_csr_info() {
+    local csr="$1" v text bits
+    v=$(openssl req -in "$csr" -noout -subject -nameopt utf8,esc_ctrl,sep_comma_plus_space 2>/dev/null | sed -n '1p') || return 1
+    [[ -n "$v" ]] || return 1
+    PKI_CSR_SUBJECT=$(ui_safe "$(trim "${v#subject=}")")
+    text=$(openssl req -in "$csr" -noout -pubkey 2>/dev/null | openssl pkey -pubin -noout -text 2>/dev/null)
+    bits=$(sed -n '1s/.*(\([0-9]*\) bit.*/\1/p' <<<"$text")
+    if grep -q '^Modulus' <<<"$text"; then PKI_CSR_KEY="RSA ${bits}"
+    elif grep -Eq '^(ASN1 OID|NIST CURVE)' <<<"$text"; then PKI_CSR_KEY="EC P-${bits}"
+    else PKI_CSR_KEY="unknown key type"; fi
 }
 
 # ==============================================================================
@@ -543,7 +639,7 @@ cert_ui_pick() {
                 fi ;;
             *.key) crypto_key_is_encrypted "$f" && hint="passphrase-protected" || hint="not encrypted" ;;
         esac
-        ui_sel_add "$f" "$(basename "$f")" "$hint"
+        ui_sel_add "$f" "$(ui_base "$f")" "$hint"
     done < <(pki_store_files "$@")
     ui_sel_add "@path" "Type a path${G_ELLIPSIS}" "file outside the store"
     UI_SEL_HEADER="$(tui_header "Certificates & keys")"
@@ -623,7 +719,7 @@ cert_ui_identity() {
     ui_spinner_start "Generating ${PKI_KEY_LABEL[$type]} key and certificate${G_ELLIPSIS}"
     pki_create_identity "$name" "$cn" "$email" "$type" 825 "$secret"; local rc=$?
     ui_spinner_stop
-    if (( rc != 0 )); then ui_err "$ENC_ERR"; ui_pause; return; fi
+    if (( rc != 0 )); then ui_err "$(ui_safe "$ENC_ERR")"; ui_pause; return; fi
     _cert_ui_show_created "Identity created" "$CERT_DIR/$name.pem" "$CERT_DIR/$name.key"
     echo
     ui_info "Send ${BOLD}$name.pem${RESET} to people who should encrypt files for you. Never share the .key file."
@@ -639,16 +735,18 @@ cert_ui_import() {
     echo
     ui_panel "Certificate" \
         "$(ui_row "Subject" "${PKI_INFO[subject]}")" \
-        "$(ui_row "Issuer" "${PKI_INFO[issuer]}")" \
+        "$(ui_row "Issuer" "${PKI_INFO[issuer]}$([[ "${PKI_INFO[self_signed]}" == 1 ]] && printf ' %s(self-signed)%s' "$C_WARN" "$RESET")")" \
+        "$(ui_row "Public key" "$(_pki_key_short)")" \
         "$(ui_row "Valid until" "${PKI_INFO[not_after]}")" \
         "$(ui_row "Fingerprint" "${PKI_INFO[fingerprint]:0:47}")" \
         "$(ui_row "" "${PKI_INFO[fingerprint]:48}")"
     echo
-    ui_warn "Verify the fingerprint with the owner through a separate channel before trusting it."
+    ui_warn "Names inside a certificate prove nothing by themselves. Verify the fingerprint"
+    ui_note "  with the owner through a separate channel before trusting it."
     ui_confirm "Import this certificate?" n || return
     local def; def=$(basename "${src%.*}"); def=${def//[^A-Za-z0-9._-]/_}
     ui_prompt "Name in store" "$def" || return
-    if pki_import_cert "$src" "$UI_REPLY"; then ui_ok "Imported as $(ui_pathfit "$CERT_DIR/$UI_REPLY.pem")"; else ui_err "$ENC_ERR"; fi
+    if pki_import_cert "$src" "$UI_REPLY"; then ui_ok "Imported as $(ui_pathfit "$CERT_DIR/$UI_REPLY.pem")"; else ui_err "$(ui_safe "$ENC_ERR")"; fi
     ui_pause
 }
 
@@ -669,7 +767,7 @@ cert_ui_dashboard() {
         days="${PKI_INFO[days_left]:-?}"
         kind="leaf"; [[ "${PKI_INFO[is_ca]}" == 1 ]] && kind="CA"
         [[ -f "${f%.pem}.key" ]] && kind+="+key"
-        printf '  %-26s %-8s %-12s %-20s %s%s %s%s\n' "$(ui_fit "$(basename "$f" .pem)" 26)" "${kind:0:8}" "$(_pki_key_short)" \
+        printf '  %-26s %-8s %-12s %-20s %s%s %s%s\n' "$(ui_fit "$(ui_base "${f%.pem}")" 26)" "${kind:0:8}" "$(_pki_key_short)" \
             "$(ui_fit "${days} days" 20)" "$col" "$mark" "$st" "$RESET"
     done
     (( n == 0 )) && ui_note "  No certificates yet — create a quick identity to get started."
@@ -684,7 +782,7 @@ cert_ui_dashboard() {
         local mode; mode=$(get_file_mode "$k")
         local mcol="$C_OK"; [[ "$mode" == "400" || "$mode" == "600" ]] || mcol="$C_ERR"
         if crypto_key_is_encrypted "$k"; then st="${C_OK}${G_OK} passphrase-protected${RESET}"; else st="${C_WARN}${G_WARN} not encrypted${RESET}"; fi
-        printf '  %-26s %s%-6s%s %s\n' "$(ui_fit "$(basename "$k")" 26)" "$mcol" "$mode" "$RESET" "$st"
+        printf '  %-26s %s%-6s%s %s\n' "$(ui_fit "$(ui_base "$k")" 26)" "$mcol" "$mode" "$RESET" "$st"
     done
     (( kn == 0 )) && ui_note "  No private keys."
     ui_pause
@@ -693,7 +791,7 @@ cert_ui_dashboard() {
 cert_ui_inspect() {
     cert_ui_pick "Certificate to inspect" pem || return
     local file="$UI_CHOICE"
-    tui_screen "Inspect: $(basename "$file")"
+    tui_screen "Inspect: $(ui_base "$file")"
     if ! pki_cert_info "$file"; then ui_err "Not a readable X.509 certificate."; ui_pause; return; fi
     local kind="End-entity certificate"
     [[ "${PKI_INFO[is_ca]}" == 1 ]] && kind="Certificate authority"
@@ -744,7 +842,7 @@ cert_ui_create_ca() {
     ui_spinner_start "Generating ${PKI_KEY_LABEL[$type]} CA${G_ELLIPSIS}"
     pki_create_ca "$name" "$cn" "$org" "$country" "$type" "$days" "$secret"; local rc=$?
     ui_spinner_stop
-    if (( rc != 0 )); then ui_err "$ENC_ERR"; ui_pause; return; fi
+    if (( rc != 0 )); then ui_err "$(ui_safe "$ENC_ERR")"; ui_pause; return; fi
     _cert_ui_show_created "Root CA created" "$CERT_DIR/$name.pem" "$CERT_DIR/$name.key" \
         "$(ui_row "Constraints" "CA:TRUE, pathlen:0 ${G_DOT} keyCertSign, cRLSign")"
     ui_pause
@@ -766,7 +864,7 @@ cert_ui_create_csr() {
     ui_spinner_start "Generating ${PKI_KEY_LABEL[$type]} key and CSR${G_ELLIPSIS}"
     pki_create_csr "$name" "$cn" "$email" "$org" "$type" "$secret"; local rc=$?
     ui_spinner_stop
-    if (( rc != 0 )); then ui_err "$ENC_ERR"; ui_pause; return; fi
+    if (( rc != 0 )); then ui_err "$(ui_safe "$ENC_ERR")"; ui_pause; return; fi
     _cert_ui_show_created "Key and CSR created" "" "$CERT_DIR/$name.key" "$(ui_row "CSR" "$(ui_pathfit "$CERT_DIR/$name.csr")")"
     echo
     ui_info "Next: sign it with your CA (menu 7) or send the .csr to an external CA."
@@ -782,13 +880,25 @@ cert_ui_sign() {
         cert_ui_pick "CA private key" key || return
         ca_key="$UI_CHOICE"
     fi
+    # Show what is about to be certified: the subject comes from the request,
+    # not from its file name.
+    tui_screen "Sign a certificate request"
+    if ! pki_csr_info "$csr"; then ui_err "Not a readable certificate request."; ui_pause; return; fi
+    ui_panel "Request" \
+        "$(ui_row "File" "$(ui_base "$csr")")" \
+        "$(ui_row "Subject" "$PKI_CSR_SUBJECT")" \
+        "$(ui_row "Public key" "$PKI_CSR_KEY")" \
+        "$(ui_row "Signed by" "$(ui_base "$ca_cert")")"
+    echo
+    ui_note "Extensions requested inside the CSR are ignored; the profile you choose decides them."
+    ui_confirm "Issue a certificate for this subject?" n || return
     UI_SEL_HEADER="$(tui_header "Sign a CSR")"
     ui_select "Certificate profile" \
         "identity|Identity / file encryption|key encipherment + e-mail protection + client auth" \
         "server|TLS server|serverAuth, requires DNS names / IPs" \
         "client|TLS client|clientAuth only" || return
     local profile="$UI_CHOICE"
-    tui_screen "Sign $(basename "$csr") with $(basename "$ca_cert")"
+    tui_screen "Sign $(ui_base "$csr") with $(ui_base "$ca_cert")"
     local san=""
     if [[ "$profile" == "server" ]]; then
         ui_prompt "DNS names / IPs, comma-separated (e.g. example.com, www.example.com, 10.0.0.5)" "" || return
@@ -801,47 +911,53 @@ cert_ui_sign() {
     ui_prompt "Validity in days" "$defdays" || return
     local days="$UI_REPLY" secret=""
     if crypto_key_is_encrypted "$ca_key"; then
-        ui_prompt_secret "Passphrase for $(basename "$ca_key")" || return
+        ui_prompt_secret "Passphrase for $(ui_base "$ca_key")" || return
         secret="$UI_REPLY"
     fi
-    local out; out="$CERT_DIR/$(basename "${csr%.csr}").pem"
+    local out_name; out_name=$(basename "${csr%.csr}")
+    if ! is_safe_name "$out_name"; then
+        ui_prompt "Name for the new certificate in the store" "" || return
+        out_name="$UI_REPLY"
+        is_safe_name "$out_name" || { ui_err "Use letters, digits, dot, dash, underscore."; ui_pause; return; }
+    fi
+    local out="$CERT_DIR/${out_name}.pem"
     ui_spinner_start "Signing${G_ELLIPSIS}"
     pki_sign_csr "$csr" "$ca_cert" "$ca_key" "$profile" "$days" "$san" "$out" "$secret"; local rc=$?
     ui_spinner_stop
-    if (( rc != 0 )); then ui_err "$ENC_ERR"; ui_pause; return; fi
+    if (( rc != 0 )); then ui_err "$(ui_safe "$ENC_ERR")"; ui_pause; return; fi
     local key=""; [[ -f "${out%.pem}.key" ]] && key="${out%.pem}.key"
-    _cert_ui_show_created "Certificate issued" "$out" "$key" "$(ui_row "Issuer" "$(basename "$ca_cert")")"
+    _cert_ui_show_created "Certificate issued" "$out" "$key" "$(ui_row "Issuer" "$(ui_base "$ca_cert")")"
     ui_pause
 }
 
 cert_ui_check() {
     cert_ui_pick "Certificate" pem || return
     local cert="$UI_CHOICE"
-    tui_screen "Check: $(basename "$cert")"
+    tui_screen "Check: $(ui_base "$cert")"
     local key="${cert%.pem}.key"
-    if [[ -f "$key" ]] && ui_confirm "Check against $(basename "$key")?" y; then :; else
+    if [[ -f "$key" ]] && ui_confirm "Check against $(ui_base "$key")?" y; then :; else
         cert_ui_pick "Private key" key || return
         key="$UI_CHOICE"
-        tui_screen "Check: $(basename "$cert")"
+        tui_screen "Check: $(ui_base "$cert")"
     fi
     local secret="" rc
     if crypto_key_is_encrypted "$key"; then
-        ui_prompt_secret "Passphrase for $(basename "$key")" || return
+        ui_prompt_secret "Passphrase for $(ui_base "$key")" || return
         secret="$UI_REPLY"
     fi
     pki_match "$cert" "$key" "$secret"; rc=$?
     echo
     case $rc in
-        0) ui_ok "${BOLD}Match${RESET} — $(basename "$key") is the private key of $(basename "$cert")." ;;
+        0) ui_ok "${BOLD}Match${RESET} — $(ui_base "$key") is the private key of $(ui_base "$cert")." ;;
         1) ui_err "${BOLD}No match${RESET} — these two files do not belong together." ;;
-        *) ui_err "$ENC_ERR" ;;
+        *) ui_err "$(ui_safe "$ENC_ERR")" ;;
     esac
     # Chain check against every CA in the store.
     local ca found=0
     for ca in "$CERT_DIR"/*.pem; do
         [[ -f "$ca" && "$ca" != "$cert" ]] || continue
-        openssl x509 -in "$ca" -noout -text 2>/dev/null | grep -q 'CA:TRUE' || continue
-        if pki_verify_chain "$cert" "$ca"; then ui_ok "Chain verifies against CA $(basename "$ca")."; found=1; fi
+        pki_is_ca "$ca" || continue
+        if pki_verify_chain "$cert" "$ca"; then ui_ok "Chain verifies against CA $(ui_base "$ca")."; found=1; fi
     done
     if (( found == 0 )); then
         if pki_cert_info "$cert" && [[ "${PKI_INFO[self_signed]}" == 1 ]]; then ui_info "Self-signed certificate (no issuing CA)."
@@ -857,10 +973,10 @@ cert_ui_export() {
         cert_ui_pick "Matching private key" key || return
         key="$UI_CHOICE"
     fi
-    tui_screen "Export $(basename "$cert") to PKCS#12" "Bundles the certificate and its private key into one password-protected .p12 file."
+    tui_screen "Export $(ui_base "$cert") to PKCS#12" "Bundles the certificate and its private key into one password-protected .p12 file."
     local key_secret=""
     if crypto_key_is_encrypted "$key"; then
-        ui_prompt_secret "Passphrase for $(basename "$key")" || return
+        ui_prompt_secret "Passphrase for $(ui_base "$key")" || return
         key_secret="$UI_REPLY"
     fi
     tui_new_secret "Export password" || return
@@ -869,12 +985,13 @@ cert_ui_export() {
     ui_spinner_start "Packaging${G_ELLIPSIS}"
     pki_export_p12 "$cert" "$key" "$out" "$secret" "$key_secret"; local rc=$?
     ui_spinner_stop
-    if (( rc != 0 )); then ui_err "$ENC_ERR"; ui_pause; return; fi
+    if (( rc != 0 )); then ui_err "$(ui_safe "$ENC_ERR")"; ui_pause; return; fi
     echo
     UI_PANEL_COLOR="$C_OK"
     ui_panel "$G_OK PKCS#12 bundle written" \
         "$(ui_row "File" "$(ui_pathfit "$out")  ${C_MUTED}($(human_size "$(get_file_size "$out")"))${RESET}")" \
-        "$(ui_row "Protection" "AES-256-CBC, PBKDF2, HMAC-SHA256")"
+        "$(ui_row "Protection" "AES-256-CBC, PBKDF2 ${PKI_P12_ITER} iterations, HMAC-SHA256")"
+    (( PKI_P12_ITER < 100000 )) && ui_warn "This OpenSSL version cannot raise the bundle's work factor: use a long export password."
     ui_note "Import it in your browser, mail client or OS keychain; the export password is required."
     ui_pause
 }

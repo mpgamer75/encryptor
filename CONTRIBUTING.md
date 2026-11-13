@@ -93,11 +93,21 @@ core.sh              →  shared runtime, no dependencies
    (a directory created in a subshell would escape the exit trap).
 7. UI output goes through the `ui_*` helpers so that `NO_COLOR`, ASCII
    fallback and line-mode keep working. No raw escape codes elsewhere.
-8. Naming: `snake_case` functions, `_leading_underscore` for module-private
+8. **Untrusted text is filtered before display.** File names, certificate
+   fields and engine messages go through `ui_safe` / `ui_base` / `ui_path`
+   before they reach the terminal.
+9. **No early-exit readers on a pipeline whose status matters.** The program
+   runs with `pipefail`: `openssl … | grep -q …` or `… | head -n 1` can fail
+   intermittently when the reader exits before the writer finishes. Capture
+   the output in a variable and test that, or use a reader that consumes all
+   input (`sed -n '1p'`, `grep … >/dev/null`).
+10. Numbers from users or files are validated with a regular expression and
+    then read in base 10 (`$(( 10#$n ))`): a leading zero must not mean octal.
+11. Naming: `snake_case` functions, `_leading_underscore` for module-private
    ones, `UPPER_CASE` globals, prefixes by module (`crypto_`, `pki_`,
    `audit_`, `ui_`, `tui_`, `cli_`, `core_`).
-9. ShellCheck clean at `-S warning`, both per file and for the concatenated
-   program (CI runs both).
+12. ShellCheck clean at `-S warning`, both per file and for the concatenated
+    program (CI runs both).
 
 ### Adding a cipher
 

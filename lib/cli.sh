@@ -40,9 +40,12 @@ ${BOLD}ENCRYPT / DECRYPT OPTIONS${RESET}
       --kdf NAME           Password KDF for new files: scrypt (memory-hard, default when
                            supported), pbkdf2 (NIST-approved), auto
       --iter N             PBKDF2 iterations with --kdf pbkdf2 (default ${ENC_DEFAULT_ITER})
+      --legacy             Accept an Encryptor 2.x file. Those files have NO
+                           authentication: use only for files you trust.
       --legacy-iter N      Iterations of a legacy file (2.1: 600000, 2.0: 100000)
   -f, --force              Overwrite an existing output file
       --shred              After a verified encryption, overwrite and delete the input
+                           (with --recipient, also give --key so the result can be verified)
       --json               One JSON object per file on stdout
   -q, --quiet              No informational output
       --no-color           Disable colors (also: NO_COLOR=1)
@@ -83,14 +86,15 @@ EOF
 # --- Output helpers ----------------------------------------------------------
 CLI_JSON=0; CLI_QUIET=0
 
+# Messages may quote file names: they are made terminal-safe here, once.
 _cli_err() {
     if [[ -t 2 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != "dumb" ]]; then
-        printf '\e[31mencryptor: error:\e[0m %s\n' "$*" >&2
+        printf '\e[31mencryptor: error:\e[0m %s\n' "$(ui_safe "$*")" >&2
     else
-        printf 'encryptor: error: %s\n' "$*" >&2
+        printf 'encryptor: error: %s\n' "$(ui_safe "$*")" >&2
     fi
 }
-_cli_warn() { printf 'encryptor: warning: %s\n' "$*" >&2; }
+_cli_warn() { printf 'encryptor: warning: %s\n' "$(ui_safe "$*")" >&2; }
 _cli_usage_error() { _cli_err "$*"; printf 'Run "encryptor help" for usage.\n' >&2; exit "$EX_USAGE"; }
 _cli_need_arg() { [[ $# -ge 2 ]] || _cli_usage_error "option $1 requires a value"; }
 
@@ -121,6 +125,8 @@ _cli_load_password() {
         [[ "$CLI_PASS_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || _cli_usage_error "invalid environment variable name: $CLI_PASS_ENV"
         CLI_SECRET="${!CLI_PASS_ENV:-}"
         [[ -n "$CLI_SECRET" ]] || { _cli_err "environment variable $CLI_PASS_ENV is empty or unset"; exit "$EX_USAGE"; }
+        # Do not hand the password on to every child process we start.
+        unset "$CLI_PASS_ENV"
     elif (( CLI_PASS_STDIN )); then
         IFS= read -r pw || true
         pw=${pw%$'\r'}
@@ -144,11 +150,12 @@ _cli_load_password() {
 }
 
 # --- JSON result lines -------------------------------------------------------
-_cli_json_ok() {    # op input output format mode algo bytes_in bytes_out ms [kdf]
-    local kdf=""
-    [[ -n "${10:-}" ]] && kdf=",\"kdf\":\"${10}\""
+_cli_json_ok() {    # op input output format mode algo bytes_in bytes_out ms [kdf] [verified]
+    local fields=""
+    [[ -n "${10:-}" ]] && fields+=",\"kdf\":\"${10}\""
+    [[ -n "${11:-}" ]] && fields+=",\"verified\":${11}"
     printf '{"status":"success","operation":"%s","input":"%s","output":"%s","format":"%s","mode":"%s","algo":"%s"%s,"bytes_in":%d,"bytes_out":%d,"ms":%d}\n' \
-        "$1" "$(json_escape "$2")" "$(json_escape "$3")" "$4" "$5" "$6" "$kdf" "$7" "$8" "$9"
+        "$1" "$(json_escape "$2")" "$(json_escape "$3")" "$4" "$5" "$6" "$fields" "$7" "$8" "$9"
 }
 _cli_json_err() {   # op input code message
     printf '{"status":"error","operation":"%s","input":"%s","code":%d,"error":"%s"}\n' \
@@ -165,6 +172,8 @@ _cli_format_name() {
 # --- encrypt -----------------------------------------------------------------
 cli_encrypt() {
     local output="" algo="$ENC_DEFAULT_CIPHER" iter="$ENC_DEFAULT_ITER" force=0 shred=0 kdf="" iter_given=0
+    local verify_key="" verify_key_secret=""
+    CLI_KEY_PASS_FILE=""
     local -a files=() recipients=()
     CLI_PASS_FILE=""; CLI_PASS_ENV=""; CLI_PASS_STDIN=0
     while [[ $# -gt 0 ]]; do
@@ -179,6 +188,8 @@ cli_encrypt() {
             --kdf)           _cli_need_arg "$@"; kdf="${2,,}"; shift 2 ;;
             -f|--force)      force=1; shift ;;
             --shred)         shred=1; shift ;;
+            -k|--key)        _cli_need_arg "$@"; verify_key="$2"; shift 2 ;;
+            --key-pass-file) _cli_need_arg "$@"; CLI_KEY_PASS_FILE="$2"; shift 2 ;;
             --json)          CLI_JSON=1; shift ;;
             -q|--quiet)      CLI_QUIET=1; shift ;;
             --)              shift; files+=("$@"); break ;;
@@ -200,6 +211,14 @@ cli_encrypt() {
         *)                  _cli_usage_error "unknown KDF '$kdf' (valid: scrypt pbkdf2 auto)" ;;
     esac
     if (( iter_given )) && [[ "$kdf" == "scrypt" ]]; then _cli_usage_error "--iter applies to --kdf pbkdf2 only"; fi
+    [[ "$iter" =~ ^[0-9]{1,9}$ ]] && iter=$(( 10#$iter ))      # "0800000" is decimal, not octal
+    if (( shred )) && (( ${#recipients[@]} > 0 )); then
+        # Without a recipient's private key the result cannot be test-opened,
+        # and deleting the only plaintext on faith is how data gets lost.
+        [[ -n "$verify_key" ]] || _cli_usage_error "--shred with --recipient requires --key KEY (a recipient's private key) to verify the encrypted file before the original is deleted"
+        [[ -f "$verify_key" && -r "$verify_key" ]] || { _cli_err "private key not found: $verify_key"; exit "$EX_NOINPUT"; }
+        if [[ -n "$CLI_KEY_PASS_FILE" ]]; then _cli_read_secret_file "$CLI_KEY_PASS_FILE" "Key passphrase"; verify_key_secret="$CLI_SECRET"; CLI_SECRET=""; fi
+    fi
     if [[ -n "$output" ]] && (( ${#files[@]} > 1 )); then _cli_usage_error "--output can only be used with a single input"; fi
     if (( CLI_PASS_STDIN )); then
         local f; for f in "${files[@]}"; do [[ "$f" == "-" ]] && _cli_usage_error "--pass-stdin cannot be combined with input from stdin"; done
@@ -223,8 +242,10 @@ cli_encrypt() {
         if [[ -n "$output" ]]; then out="$output"
         elif [[ "$in" == "-" ]]; then out="-"
         else out="${in}.enc"; fi
-        if [[ "$in" != "-" && "$in" == "$out" ]]; then
+        if [[ "$in" != "-" && "$out" != "-" ]] && { [[ "$in" == "$out" ]] || same_file "$in" "$out"; }; then
             ENC_ERR="Input and output are the same file: $in"; rc=$EX_USAGE
+        elif [[ "$out" != "-" && -d "$out" ]]; then
+            ENC_ERR="Output is a directory: $out"; rc=$EX_CANTCREAT
         elif [[ "$in" != "-" && -d "$in" ]]; then
             ENC_ERR="$in is a directory. Archive it first:  tar cz '$in' | encryptor encrypt -o '${in%/}.tgz.enc' -"; rc=$EX_NOINPUT
         elif [[ "$out" != "-" && -e "$out" && $force -eq 0 ]]; then
@@ -243,16 +264,20 @@ cli_encrypt() {
                 _cli_json_ok encrypt "$in" "$out" "encryptor/3" "$mode" "$algo" "$ENC_RESULT_BYTES_IN" "$ENC_RESULT_BYTES_OUT" "$(( t1 - t0 ))" "$used_kdf" >&$stream
             elif (( ! CLI_QUIET )); then
                 local how="$mode"; [[ "$mode" == "password" ]] && how="password/$ENC_RESULT_KDF"
-                printf 'Encrypted: %s %s %s (%s, %s, %d ms)\n' "$in" "$G_ARROW" "$out" "$algo+hmac-sha256" "$how" "$(( t1 - t0 ))" >&$stream
+                printf 'Encrypted: %s %s %s (%s, %s, %d ms)\n' "$(ui_safe "$in")" "$G_ARROW" "$(ui_safe "$out")" "$algo+hmac-sha256" "$how" "$(( t1 - t0 ))" >&$stream
             fi
             if (( shred )) && [[ "$in" != "-" && "$out" != "-" ]]; then
                 local vrc=0
-                if [[ "$mode" == "password" ]]; then crypto_verify "$out"; vrc=$?; else crypto_inspect "$out"; vrc=$?; fi
+                if [[ "$mode" == "recipient" ]]; then ENC_KEY_FILE="$verify_key"; ENC_KEY_SECRET="$verify_key_secret"; fi
+                crypto_verify "$out"; vrc=$?
+                # Last line of defence against deleting the only copy: the file
+                # about to be shredded must not be the file that was just written.
+                if (( vrc == 0 )) && same_file "$in" "$out"; then ENC_ERR="input and output are the same file"; vrc=$EX_FAIL; fi
                 if (( vrc != 0 )); then
                     _cli_err "verification of $out failed; $in was NOT deleted ($ENC_ERR)"; worst=$EX_FAIL
                 elif secure_delete "$in"; then
                     log_operation "INFO" "Original securely deleted: $in"
-                    (( CLI_QUIET || CLI_JSON )) || printf 'Deleted:   %s (%s; best-effort on SSD/CoW storage)\n' "$in" "$SECURE_DELETE_METHOD"
+                    (( CLI_QUIET || CLI_JSON )) || printf 'Deleted:   %s (%s; best-effort on SSD/CoW storage)\n' "$(ui_safe "$in")" "$SECURE_DELETE_METHOD"
                 else
                     _cli_err "$ENC_ERR"; worst=$EX_FAIL
                 fi
@@ -271,7 +296,7 @@ cli_encrypt() {
 # --- decrypt / verify --------------------------------------------------------
 cli_decrypt() {
     local op="$1"; shift           # decrypt | verify
-    local output="" force=0 legacy_algo="" legacy_iter=""
+    local output="" force=0 legacy_algo="" legacy_iter="" allow_legacy=0
     local -a files=()
     local key="" cert=""
     CLI_PASS_FILE=""; CLI_PASS_ENV=""; CLI_PASS_STDIN=0; CLI_KEY_PASS_FILE=""
@@ -285,6 +310,7 @@ cli_decrypt() {
             -c|--cert)       _cli_need_arg "$@"; cert="$2"; shift 2 ;;
             --key-pass-file) _cli_need_arg "$@"; CLI_KEY_PASS_FILE="$2"; shift 2 ;;
             -a|--algo)       _cli_need_arg "$@"; legacy_algo="${2,,}"; shift 2 ;;
+            --legacy)        allow_legacy=1; shift ;;
             --legacy-iter|--iter) _cli_need_arg "$@"; legacy_iter="$2"; shift 2 ;;
             -f|--force)      force=1; shift ;;
             --json)          CLI_JSON=1; shift ;;
@@ -296,6 +322,9 @@ cli_decrypt() {
         esac
     done
     (( ${#files[@]} > 0 )) || _cli_usage_error "$op: no input file"
+    if (( CLI_PASS_STDIN )); then
+        local f; for f in "${files[@]}"; do [[ "$f" == "-" ]] && _cli_usage_error "--pass-stdin cannot be combined with input from stdin"; done
+    fi
     if [[ -n "$output" ]] && (( ${#files[@]} > 1 )); then _cli_usage_error "--output can only be used with a single input"; fi
     # v2 compatibility: "--algo smime --cert CERT --pass-file KEY" (key path in --pass-file).
     if [[ "$legacy_algo" == "smime" ]]; then
@@ -303,6 +332,10 @@ cli_decrypt() {
         legacy_algo=""
     fi
     if [[ -n "$legacy_algo" ]]; then crypto_is_cipher "$legacy_algo" || _cli_usage_error "unknown algorithm '$legacy_algo' (valid: ${ENC_CIPHER_IDS[*]})"; fi
+    if [[ -n "$legacy_iter" ]]; then
+        [[ "$legacy_iter" =~ ^[0-9]{1,9}$ ]] || _cli_usage_error "--legacy-iter expects a number"
+        legacy_iter=$(( 10#$legacy_iter ))
+    fi
 
     local in out rc worst=0 t0 t1 secret_loaded=0 key_secret=""
     if [[ -n "$CLI_KEY_PASS_FILE" ]]; then
@@ -318,7 +351,13 @@ cli_decrypt() {
             core_tmpdir; probe="$TEMP_DIR/cli-stdin.spool"
             cat > "$probe" || { _cli_err "cannot read standard input"; exit "$EX_NOINPUT"; }
         fi
-        if crypto_inspect "$probe"; then
+        if crypto_inspect "$probe" && [[ "${ENC_META[format]}" == legacy-* && $allow_legacy -eq 0 && "$op" == "decrypt" ]]; then
+            # Refuse before asking for any secret: the file itself must never
+            # be able to select an unauthenticated code path.
+            ENC_ERR="$in is a legacy Encryptor 2.x file with NO authentication: its content cannot be verified. If you trust its origin, decrypt it with --legacy (and --algo / --legacy-iter as needed), then re-encrypt it."
+            rc=$EX_UNSUPPORTED
+        elif crypto_inspect "$probe"; then
+            ENC_ALLOW_LEGACY=$allow_legacy
             local need="password"
             [[ "${ENC_META[format]}" == "legacy-smime" || "${ENC_META[mode]:-}" == "recipient" ]] && need="key"
             if [[ "$need" == "password" ]]; then
@@ -333,8 +372,9 @@ cli_decrypt() {
             fi
             [[ -n "$legacy_algo" ]] && ENC_LEGACY_ALGO="$legacy_algo"
             [[ -n "$legacy_iter" ]] && ENC_LEGACY_ITER="$legacy_iter"
-            if [[ "${ENC_META[format]}" == legacy-* ]] && (( ! CLI_QUIET )) && [[ "$op" == "decrypt" ]]; then
-                _cli_warn "$in is a legacy 2.x file: its content cannot be authenticated. Re-encrypt it to upgrade."
+            if [[ "${ENC_META[format]}" == legacy-* && "$op" == "decrypt" ]]; then
+                # Deliberately not silenced by --quiet.
+                _cli_warn "$in is a legacy 2.x file: its content is NOT authenticated. Re-encrypt it to upgrade."
             fi
         else
             rc=$?
@@ -345,7 +385,11 @@ cli_decrypt() {
             elif [[ "$in" == "-" ]]; then out="-"
             elif [[ "$in" == *.enc ]]; then out="${in%.enc}"
             else out="${in}.dec"; fi
-            if [[ "$out" != "-" && -e "$out" && $force -eq 0 ]]; then
+            if [[ "$out" != "-" && -d "$out" ]]; then
+                ENC_ERR="Output is a directory: $out"; rc=$EX_CANTCREAT
+            elif [[ "$in" != "-" && "$out" != "-" ]] && same_file "$in" "$out"; then
+                ENC_ERR="Input and output are the same file: $in"; rc=$EX_USAGE
+            elif [[ "$out" != "-" && -e "$out" && $force -eq 0 ]]; then
                 ENC_ERR="Output already exists: $out (use --force to overwrite, or --output)"; rc=$EX_CANTCREAT
             fi
         fi
@@ -362,14 +406,15 @@ cli_decrypt() {
             if [[ "$op" == "verify" ]]; then
                 log_operation "INFO" "Verified: $in"
                 if (( CLI_JSON )); then _cli_json_ok verify "$in" "" "$(_cli_format_name)" "${ENC_META[mode]:-}" "${ENC_META[cipher]:-}" "${ENC_META[size]:-0}" 0 "$(( t1 - t0 ))"
-                elif (( ! CLI_QUIET )); then printf 'OK: %s is authentic (%s)\n' "$in" "${ENC_META[cipher]}+hmac-sha256"; fi
+                elif (( ! CLI_QUIET )); then printf 'OK: %s is authentic (%s)\n' "$(ui_safe "$in")" "${ENC_META[cipher]}+hmac-sha256"; fi
             else
                 log_operation "SUCCESS" "Decrypted: $in → $out (format=${ENC_META[format]})"
                 local algo_name="${ENC_META[cipher]:-$ENC_LEGACY_ALGO}"
                 if (( CLI_JSON )); then
-                    _cli_json_ok decrypt "$in" "$out" "$(_cli_format_name)" "${ENC_META[mode]:-legacy}" "$algo_name" "${ENC_META[size]:-0}" "$ENC_RESULT_BYTES_OUT" "$(( t1 - t0 ))" >&$stream
+                    local verified=true; [[ "${ENC_META[format]}" == v3 ]] || verified=false
+                    _cli_json_ok decrypt "$in" "$out" "$(_cli_format_name)" "${ENC_META[mode]:-legacy}" "$algo_name" "${ENC_META[size]:-0}" "$ENC_RESULT_BYTES_OUT" "$(( t1 - t0 ))" "" "$verified" >&$stream
                 elif (( ! CLI_QUIET )); then
-                    printf 'Decrypted: %s %s %s (%s, %d ms)\n' "$in" "$G_ARROW" "$out" "$algo_name" "$(( t1 - t0 ))" >&$stream
+                    printf 'Decrypted: %s %s %s (%s, %d ms)\n' "$(ui_safe "$in")" "$G_ARROW" "$(ui_safe "$out")" "$algo_name" "$(( t1 - t0 ))" >&$stream
                 fi
             fi
         else
@@ -406,7 +451,8 @@ cli_inspect() {
     if (( CLI_JSON )); then
         printf '{"status":"success","file":"%s","size":%d,"format":"%s"' "$(json_escape "$file")" "${ENC_META[size]}" "$fmt"
         if [[ "${ENC_META[format]}" == v3 ]]; then
-            printf ',"authenticated":true,"mode":"%s","cipher":"%s","mac":"%s","payload_bytes":%d' \
+            # "verified" is always false here: inspect reads the header only.
+            printf ',"integrity":"hmac-sha256","verified":false,"mode":"%s","cipher":"%s","mac":"%s","payload_bytes":%d' \
                 "${ENC_META[mode]}" "${ENC_META[cipher]}" "${ENC_META[mac]}" "${ENC_META[body_len]}"
             if [[ "${ENC_META[mode]}" == password ]]; then
                 if [[ "${ENC_META[kdf]}" == "scrypt" ]]; then
@@ -417,7 +463,7 @@ cli_inspect() {
                 fi
             else
                 local fp first=1
-                printf ',"keywrap":"cms","recipients":['
+                printf ',"keywrap":"cms","claimed_recipients":['
                 for fp in "${ENC_META_RCPT[@]:-}"; do
                     [[ -n "$fp" ]] || continue
                     (( first )) || printf ','
@@ -426,19 +472,20 @@ cli_inspect() {
                 printf ']'
             fi
         else
-            printf ',"authenticated":false'
+            printf ',"integrity":"none","verified":false'
         fi
         printf '}\n'
     else
-        printf 'File:        %s (%s)\n' "$file" "$(human_size "${ENC_META[size]}")"
+        printf 'File:        %s (%s)\n' "$(ui_safe "$file")" "$(human_size "${ENC_META[size]}")"
         case "${ENC_META[format]}" in
             v3)
-                printf 'Format:      ENCRYPTOR/3 (authenticated, encrypt-then-MAC)\n'
+                printf 'Format:      ENCRYPTOR/3 (encrypt-then-MAC with HMAC-SHA256)\n'
+                printf 'Verified:    no — inspect only reads the header; run "encryptor verify" to check the tag\n'
                 printf 'Cipher:      %s\n' "${ENC_CIPHER_LABEL[${ENC_META[cipher]}]}"
                 if [[ "${ENC_META[mode]}" == password ]]; then
                     printf 'Key:         password, %s\n' "$(crypto_meta_kdf_label)"
                 else
-                    printf 'Key:         %d certificate recipient(s), CMS key wrap\n' "${#ENC_META_RCPT[@]}"
+                    printf 'Key:         %d certificate recipient(s) listed in the header, CMS key wrap\n' "${#ENC_META_RCPT[@]}"
                     local fp; for fp in "${ENC_META_RCPT[@]:-}"; do [[ -n "$fp" ]] && printf '  recipient: sha256:%s\n' "$fp"; done
                 fi
                 printf 'Payload:     %s\n' "$(human_size "${ENC_META[body_len]}")" ;;
@@ -478,6 +525,7 @@ cli_certs() {
         esac
     done
     [[ "$warn_days" =~ ^[0-9]{1,5}$ ]] || _cli_usage_error "--warn-days expects a number of days"
+    warn_days=$(( 10#$warn_days ))      # "030" means thirty, not octal 24
     core_init_state
     local rc=0
     if (( CLI_JSON )); then pki_report_json "$warn_days" || rc=$EX_FAIL
@@ -497,7 +545,8 @@ cli_selftest() {
 
 cli_passgen() {
     local len="${1:-24}"
-    [[ "$len" =~ ^[0-9]{1,3}$ ]] && (( len >= 12 && len <= 128 )) || _cli_usage_error "passgen: LENGTH must be between 12 and 128"
+    [[ "$len" =~ ^[0-9]{1,3}$ ]] && (( 10#$len >= 12 && 10#$len <= 128 )) || _cli_usage_error "passgen: LENGTH must be between 12 and 128"
+    len=$(( 10#$len ))
     local pw; pw=$(crypto_generate_password "$len") || { _cli_err "could not obtain random bytes"; exit "$EX_FAIL"; }
     printf '%s\n' "$pw"
     exit 0
@@ -533,8 +582,8 @@ _encryptor() {
     esac
     if [[ "$cur" == -* ]]; then
         case "$cmd" in
-            encrypt) COMPREPLY=( $(compgen -W "--output --pass-file --pass-env --pass-stdin --recipient --algo --kdf --iter --force --shred --json --quiet --no-color" -- "$cur") ) ;;
-            decrypt|verify) COMPREPLY=( $(compgen -W "--output --pass-file --pass-env --pass-stdin --key --cert --key-pass-file --algo --legacy-iter --force --json --quiet --no-color" -- "$cur") ) ;;
+            encrypt) COMPREPLY=( $(compgen -W "--output --pass-file --pass-env --pass-stdin --recipient --key --key-pass-file --algo --kdf --iter --force --shred --json --quiet --no-color" -- "$cur") ) ;;
+            decrypt|verify) COMPREPLY=( $(compgen -W "--output --pass-file --pass-env --pass-stdin --key --cert --key-pass-file --algo --legacy --legacy-iter --force --json --quiet --no-color" -- "$cur") ) ;;
             inspect|audit) COMPREPLY=( $(compgen -W "--json" -- "$cur") ) ;;
             certs) COMPREPLY=( $(compgen -W "--json --warn-days" -- "$cur") ) ;;
         esac

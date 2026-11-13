@@ -41,10 +41,9 @@ New files are written in the self-describing
 .B ENCRYPTOR/3
 container: a stream cipher or block cipher combined with HMAC-SHA256
 (encrypt-then-MAC). The authentication tag covers the header and all
-ciphertext and is verified
-.I before
-any plaintext is produced, so a wrong password and a modified file are both
-detected and nothing is written.
+ciphertext. The file is read once, and output is released only if the tag over
+the bytes that were decrypted is correct: a wrong password, a modified file,
+or a file altered while it is being read never produce output.
 .PP
 Password mode generates a random file key and seals it under the password
 with scrypt (N=16384, r=8, p=5; memory-hard), or derives the key with
@@ -59,8 +58,8 @@ never written to disk.
 .PP
 Files written by Encryptor 2.x (raw
 .B openssl enc
-output, or S/MIME) can still be decrypted. They carry no authentication and
-should be re-encrypted.
+output, or S/MIME) carry no authentication. They are refused unless
+\fB\-\-legacy\fR is given, and should be re-encrypted.
 .SH COMMANDS
 .TP
 .B encrypt
@@ -132,6 +131,10 @@ or \fBauto\fR.
 \fB\-\-iter\fR \fIN\fR
 PBKDF2 iterations (minimum 100000, default 600000). Implies \fB\-\-kdf pbkdf2\fR.
 .TP
+\fB\-\-legacy\fR
+Accept an Encryptor 2.x file. Such files cannot be verified: use this only for
+files whose origin you trust. Without it they are refused with exit status 6.
+.TP
 \fB\-\-legacy\-iter\fR \fIN\fR
 Iterations of a legacy file: 600000 for 2.1 (default), 100000 for 2.0.
 .TP
@@ -140,7 +143,9 @@ Overwrite an existing output file.
 .TP
 \fB\-\-shred\fR
 After the encrypted copy has been verified, overwrite and delete the input.
-Best effort only on SSDs and copy-on-write or journaling filesystems.
+With \fB\-\-recipient\fR, \fB\-\-key\fR must name a recipient's private key so
+that the copy can be opened. Best effort only on SSDs and copy-on-write or
+journaling filesystems.
 .TP
 \fB\-\-json\fR
 Print one JSON object per file on standard output.

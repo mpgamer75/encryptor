@@ -2,14 +2,22 @@
 # Encryptor — container image
 #
 #   docker build -t encryptor .
-#   docker run --rm -it -v "$PWD:/data" encryptor                 # interactive UI
-#   docker run --rm -v "$PWD:/data" encryptor \
-#       encrypt --pass-file /data/pass.txt secret.txt             # scripted
 #
-# Certificates and keys live in /home/encryptor/.config/encryptor: mount a
-# volume there to keep them between runs.
+#   # Run as YOUR user, so files written to the mounted directory belong to you
+#   # (the tool creates everything with mode 0600):
+#   docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/data" encryptor
+#   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/data" encryptor \
+#       encrypt --pass-file /data/pass.txt secret.txt
+#
+# Certificates, keys and the log live in $ENCRYPTOR_CONFIG_DIR (default
+# /home/encryptor/.config/encryptor, which only uid 1000 can write). To keep
+# them between runs, mount a directory and point the variable at it:
+#   -v "$HOME/.config/encryptor:/state" -e ENCRYPTOR_CONFIG_DIR=/state
+#
+# The base image tag is updated by Dependabot (.github/dependabot.yml); rebuild
+# regularly to pick up OpenSSL security fixes.
 # ==============================================================================
-FROM alpine:3.20
+FROM alpine:3.24
 
 LABEL org.opencontainers.image.title="Encryptor" \
       org.opencontainers.image.description="Authenticated file encryption and X.509 toolkit built on OpenSSL" \

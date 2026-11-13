@@ -59,9 +59,23 @@ recipient fingerprints are visible).
 ### Authenticated container
 New files use the ENCRYPTOR/3 format (docs/FORMAT.md): cipher + HMAC-SHA256,
 encrypt-then-MAC, independent subkeys. The tag covers the header and the
-ciphertext and is verified before decryption. Cipher, MAC and KDF names read
-from a file are checked against allow-lists; PBKDF2 iteration counts and
-scrypt parameters are bounded before any work is done.
+ciphertext. Cipher, MAC and KDF names read from a file are checked against
+allow-lists; PBKDF2 iteration counts and scrypt parameters are bounded before
+any work is done.
+
+### No output without authentication
+Decryption to a file reads the input exactly once: the same byte stream feeds
+the HMAC and the decryption, into a private in-progress file that is renamed
+to the requested name only if the tag over the bytes that were actually
+decrypted is correct. A file modified while it is being decrypted therefore
+cannot yield output. When the output is a pipe, the ciphertext is first copied
+into the private temporary directory and verified there before a single
+plaintext byte is emitted.
+
+### No silent downgrade
+Files in the unauthenticated 2.x formats are refused unless `--legacy` is
+given (or, in the UI, explicitly confirmed). The file being read can never
+select the unauthenticated path by itself.
 
 ### Password protection
 A random 256-bit file key is sealed under the password with scrypt (memory-
@@ -90,6 +104,13 @@ environments restricted to NIST-approved algorithms.
   files are removed on failure or interruption.
 - Existing files are not overwritten without `--force`.
 
+### Display of untrusted text
+File names, certificate subjects and anything else that originates outside the
+program pass through one filter that removes control characters before they
+are shown, so they cannot move the cursor, repaint the screen or forge lines.
+Certificate facts (CA status, key usage, key type, self-signed) are read from
+the real extensions and the public key, never from a text search.
+
 ### Input handling
 - Cipher names are matched against a fixed list before reaching OpenSSL
   (2.x passed `--algo` straight through, so `--algo none` produced plaintext).
@@ -101,11 +122,17 @@ environments restricted to NIST-approved algorithms.
 - Log messages are stripped of control characters; JSON output is escaped.
 
 ### Supply chain
-- `install.sh` installs from a local checkout, or downloads a tarball of a
-  ref you can pin (`ENCRYPTOR_REF`) and verify (`ENCRYPTOR_SHA256`). It never
-  edits shell start-up files and never calls `sudo`.
-- testssl.sh is optional, fetched only on request, from a pinned release tag.
-- Releases are built by CI and published with a `SHA256SUMS` file.
+- `install.sh` installs from a checkout only if that directory is complete and
+  not writable by anyone else; otherwise it downloads. For a release tag it
+  fetches the release tarball and checks it against `ENCRYPTOR_SHA256` or the
+  release's `SHA256SUMS`. It never edits shell start-up files and never calls
+  `sudo`.
+- testssl.sh is optional, fetched only on request, from a pinned release tag
+  whose commit hash is verified.
+- Releases are built by a job with a read-only token and published by a
+  separate job that runs no project code, with a `SHA256SUMS` file. The
+  checksums are not signed: they detect corruption, not a compromised
+  repository.
 
 ---
 
@@ -118,24 +145,33 @@ environments restricted to NIST-approved algorithms.
   With `--kdf pbkdf2` there is no memory-hardness at all. Use long
   passphrases (`encryptor passgen`).
 - **No sender authentication** in recipient mode, and no signatures.
-- **Whole-file authentication.** Verification is a separate pass before
-  decryption; this is not a chunked streaming AEAD.
+- **Whole-file authentication.** One tag covers the whole file; this is not a
+  chunked streaming AEAD. Plaintext is written to a private in-progress file
+  while the tag is being computed and is discarded if the tag is wrong.
 - **Secrets in memory.** Passwords live in Bash variables while the program
   runs. Bash cannot lock or reliably wipe memory; with swap or core dumps
   enabled they could reach the disk. `encryptor audit` reports the core-dump
   setting.
 - **Environment variables** (`--pass-env`) are readable by the same user (and
-  root) through `/proc/<pid>/environ`. Prefer `--pass-file` or `--pass-stdin`.
+  root) through `/proc/<pid>/environ` of the encryptor process and of whatever
+  started it. The variable is removed before any child process is started.
+  Prefer `--pass-file` or `--pass-stdin`.
 - **Secure deletion is best-effort.** `shred`/overwriting does not reliably
   destroy data on SSDs, copy-on-write or journaling filesystems, snapshots,
   RAID or network storage. Use full-disk encryption.
 - **Legacy 2.x files are not authenticated.** They can be decrypted but not
   verified; re-encrypt them.
-- **Time-of-check/time-of-use.** The file is read twice (verify, then
-  decrypt). An attacker able to swap the file between the two reads on your
-  own machine could cause unauthenticated plaintext to be produced; such an
-  attacker already controls your account.
-- **Not independently audited.**
+- **Shared output directories.** Writing into a directory that another user
+  can modify and that lacks the sticky bit is unsafe with any tool; the
+  in-progress file and `--shred` can be raced there.
+- **Recipient list in the header.** The `recipient-fp` lines are informational
+  and are only trustworthy after the file has been verified.
+- **Killed processes.** After `SIGKILL` an in-progress output file (plaintext,
+  for a decryption) can remain; `encryptor audit` reports such files.
+- **No professional audit.** The code has been through an independent
+  adversarial review whose findings and fixes are in
+  [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md). That is not a substitute
+  for an audit by a specialist firm.
 
 ---
 

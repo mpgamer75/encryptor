@@ -32,7 +32,7 @@ readonly ENC_DEFAULT_CIPHER="aes-256-ctr"
 readonly ENC_BODY_ITER=1                # body key is already uniformly random
 readonly ENC_ITER_MIN=100000            # lowest accepted for new files
 readonly ENC_ITER_READ_MIN=1000         # lowest accepted when reading
-readonly ENC_ITER_MAX=100000000         # DoS guard when reading untrusted headers
+readonly ENC_ITER_MAX=10000000          # cost cap: also applied to (unauthenticated) headers before any work
 readonly ENC_PASS_MAX=1000              # openssl reads at most ~1 KiB per pass line
 readonly ENC_LEGACY_ITER_V21=600000
 readonly ENC_LEGACY_ITER_V20=100000
@@ -40,8 +40,8 @@ readonly CRYPTO_KAT_PBKDF2="b62df00c273cfbe46c0e32299cc54f143709d1b0b28b6f674a2f
 
 # OWASP Password Storage Cheat Sheet: PBKDF2-HMAC-SHA256 >= 600,000.
 ENC_DEFAULT_ITER=600000
-if [[ "${ENCRYPTOR_PBKDF2_ITER:-}" =~ ^[0-9]+$ ]]; then
-    ENC_DEFAULT_ITER=$ENCRYPTOR_PBKDF2_ITER
+if [[ "${ENCRYPTOR_PBKDF2_ITER:-}" =~ ^[0-9]{1,9}$ ]]; then
+    ENC_DEFAULT_ITER=$(( 10#$ENCRYPTOR_PBKDF2_ITER ))      # base 10 even with leading zeros
 fi
 
 # Password KDF selection: scrypt (memory-hard) | pbkdf2 (NIST-approved) | auto.
@@ -54,8 +54,10 @@ case "${ENCRYPTOR_KDF:-}" in scrypt|pbkdf2|auto) ENC_DEFAULT_KDF="$ENCRYPTOR_KDF
 # the largest N the OpenSSL command line accepts (its PKCS#8 code caps scrypt
 # memory at 32 MiB), so p carries the remaining work.
 readonly ENC_SCRYPT_N=16384 ENC_SCRYPT_R=8 ENC_SCRYPT_P=5
-# Bounds enforced on parameters read from a file before any work is done.
-readonly ENC_SCRYPT_MAX_N=1048576 ENC_SCRYPT_MAX_R=32 ENC_SCRYPT_MAX_P=64
+# Bounds enforced on parameters read from a (not yet authenticated) file
+# before any work is done: at most 32 MiB of memory (128*N*r bytes) and about
+# six times the default amount of computation (N*r*p).
+readonly ENC_SCRYPT_MAX_NR=262144 ENC_SCRYPT_MAX_NRP=4194304
 # DER PrivateKeyInfo header of an X25519 key (RFC 8410); the 32 bytes that
 # follow are the master key. Used only as a standard container for sealing.
 readonly ENC_SEAL_PREFIX="302e020100300506032b656e04220420"
@@ -88,6 +90,7 @@ ENC_CERT_FILE=""             # optional matching certificate (speeds up lookup)
 ENC_KEY_SECRET=""            # passphrase of an encrypted private key (optional)
 ENC_LEGACY_ALGO="aes-256-cbc"
 ENC_LEGACY_ITER=$ENC_LEGACY_ITER_V21
+ENC_ALLOW_LEGACY=0           # 1 = the caller explicitly accepted an unauthenticated 2.x file
 
 # --- Engine outputs ---------------------------------------------------------
 declare -A ENC_META=()       # parsed container metadata (crypto_inspect)
@@ -99,6 +102,7 @@ ENC_RESULT_KDF=""            # KDF actually used by the last password-mode encry
 crypto_reset_inputs() {
     ENC_SECRET=""; ENC_RECIPIENTS=(); ENC_KEY_FILE=""; ENC_CERT_FILE=""
     ENC_KEY_SECRET=""; ENC_LEGACY_ALGO="aes-256-cbc"; ENC_LEGACY_ITER=$ENC_LEGACY_ITER_V21
+    ENC_ALLOW_LEGACY=0
 }
 
 # Optional progress hook: the TUI defines crypto_on_phase to update its display.
@@ -160,6 +164,9 @@ _crypto_rand_hex() { openssl rand -hex "$1" 2>/dev/null; }
 # Interoperable: equals `openssl dgst -sha256 -mac HMAC -macopt hexkey:KEY`.
 _crypto_hmac() {
     local key="$1" i b ipad="" opad="" inner outer inner_fmt=""
+    # Keys are 1–64 bytes of lowercase hex. (RFC 2104 hashes longer keys first;
+    # this tool never uses one, so they are refused rather than mishandled.)
+    [[ "$key" =~ ^([0-9a-f]{2}){1,64}$ ]] || return 1
     for (( i = 0; i < 64; i++ )); do
         if (( i * 2 < ${#key} )); then b=$(( 16#${key:i*2:2} )); else b=0; fi
         printf -v ipad '%s\\x%02x' "$ipad" $(( b ^ 0x36 ))
@@ -175,6 +182,22 @@ _crypto_hmac() {
     outer=${outer%% *}
     [[ ${#outer} -eq 64 ]] || return 1
     printf '%s' "$outer"
+}
+
+# A secret is handed to openssl as one line on a pipe, and openssl reads at
+# most about 1 KiB of it. Anything that would be silently cut — an embedded
+# line break, or more than ENC_PASS_MAX *bytes* — is refused instead.
+# Sets ENC_ERR and returns non-zero when the secret is unusable.
+crypto_check_secret() {
+    local secret="$1" what="${2:-Password}" LC_ALL=C
+    if [[ -z "$secret" ]]; then ENC_ERR="$what is empty."; return 1; fi
+    if [[ "$secret" == *$'\n'* || "$secret" == *$'\r'* ]]; then
+        ENC_ERR="$what contains a line break; only single-line secrets are supported."; return 1
+    fi
+    if (( ${#secret} > ENC_PASS_MAX )); then
+        ENC_ERR="$what is too long (limit: ${ENC_PASS_MAX} bytes)."; return 1
+    fi
+    return 0
 }
 
 # Subkey derivation: HMAC-SHA256(master, label). Labels are fixed ASCII strings.
@@ -254,20 +277,23 @@ _crypto_sealed_params() {
     # The three INTEGERs that follow the scrypt algorithm identifier and its salt.
     read -r n r p < <(awk '
         /OBJECT/ && (/:scrypt/ || /1\.3\.6\.1\.4\.1\.11591\.4\.11/) { seen = 1; next }
-        seen && /INTEGER/ { sub(/.*:/, ""); vals[++k] = $0; if (k == 3) { print vals[1], vals[2], vals[3]; exit } }
+        seen && /INTEGER/ && k < 3 { sub(/.*:/, ""); vals[++k] = $0; if (k == 3) print vals[1], vals[2], vals[3] }
     ' <<<"$dump")
     [[ "$n" =~ ^[0-9A-Fa-f]{1,8}$ && "$r" =~ ^[0-9A-Fa-f]{1,8}$ && "$p" =~ ^[0-9A-Fa-f]{1,8}$ ]] || return 1
     n=$(( 16#$n )); r=$(( 16#$r )); p=$(( 16#$p ))
-    (( n >= 2 && n <= ENC_SCRYPT_MAX_N && r >= 1 && r <= ENC_SCRYPT_MAX_R && p >= 1 && p <= ENC_SCRYPT_MAX_P )) || return 1
+    (( n >= 2 && r >= 1 && p >= 1 && (n & (n - 1)) == 0 )) || return 1
+    (( n * r <= ENC_SCRYPT_MAX_NR && n * r * p <= ENC_SCRYPT_MAX_NRP )) || return 1
     grep -q ':aes-256-cbc' <<<"$dump" || return 1
     printf '%d:%d:%d' "$n" "$r" "$p"
 }
 
 # Open a sealed blob with the password → master key (hex).
+# Plain `pkcs8 -inform DER` (no -topk8): OpenSSL 1.1.1 can only read an
+# encrypted DER key this way, and 3.x/4.x produce the same 48 bytes.
 _crypto_unseal_master() {
     local b64="$1" password="$2" der
     der=$(printf '%s' "$b64" | openssl base64 -d -A 2>/dev/null \
-          | openssl pkcs8 -inform DER -topk8 -nocrypt -outform DER -passin fd:3 3< <(printf '%s\n' "$password") 2>/dev/null \
+          | openssl pkcs8 -inform DER -outform DER -passin fd:3 3< <(printf '%s\n' "$password") 2>/dev/null \
           | od -An -v -tx1 | tr -d ' \n')
     [[ ${#der} -eq 96 && "${der:0:32}" == "$ENC_SEAL_PREFIX" ]] || return 1
     printf '%s' "${der:32}"
@@ -300,8 +326,50 @@ crypto_cert_fingerprint() {
     fp=${fp#*=}; fp=${fp//:/}
     printf '%s' "${fp,,}"
 }
-crypto_cert_is_rsa() {
-    openssl x509 -in "$1" -noout -text 2>/dev/null | grep -q 'Public Key Algorithm: rsaEncryption'
+# Key type and size, taken from the public key itself (never from text that a
+# certificate subject could imitate). Prints "rsa 3072", "ec 256" or "other 0".
+crypto_cert_key_info() {
+    local text bits
+    text=$(openssl x509 -in "$1" -noout -pubkey 2>/dev/null | openssl pkey -pubin -noout -text 2>/dev/null) || return 1
+    bits=$(sed -n '1s/.*(\([0-9]*\) bit.*/\1/p' <<<"$text")
+    [[ "$bits" =~ ^[0-9]+$ ]] || bits=0
+    if grep -q '^Modulus' <<<"$text"; then printf 'rsa %s' "$bits"
+    elif grep -Eq '^(ASN1 OID|NIST CURVE)' <<<"$text"; then printf 'ec %s' "$bits"
+    else printf 'other %s' "$bits"; fi
+}
+crypto_cert_is_rsa() { [[ "$(crypto_cert_key_info "$1")" == rsa* ]]; }
+
+# Is this certificate usable as an encryption recipient right now?
+# Sets ENC_ERR and returns non-zero when it is not.
+crypto_check_recipient() {
+    local cert="$1" info type bits ku start now
+    if ! openssl x509 -in "$cert" -noout >/dev/null 2>&1; then
+        ENC_ERR="Not a readable X.509 certificate: $cert"; return "$EX_NOINPUT"
+    fi
+    if ! openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1; then
+        ENC_ERR="Recipient certificate has expired: $cert"; return "$EX_FAIL"
+    fi
+    start=$(openssl x509 -in "$cert" -noout -startdate 2>/dev/null); start=$(core_date_epoch "${start#*=}")
+    now=$(date -u +%s)
+    if [[ -n "$start" ]] && (( start > now + 300 )); then
+        ENC_ERR="Recipient certificate is not valid yet: $cert"; return "$EX_FAIL"
+    fi
+    info=$(crypto_cert_key_info "$cert") || { ENC_ERR="Cannot read the public key of $cert"; return "$EX_FAIL"; }
+    type=${info% *}; bits=${info#* }
+    case "$type" in
+        rsa) if (( bits < 2048 )); then ENC_ERR="Recipient RSA key is only ${bits} bits (minimum 2048): $cert"; return "$EX_FAIL"; fi ;;
+        ec)  if (( bits < 224 ));  then ENC_ERR="Recipient EC key is only ${bits} bits (minimum 224): $cert"; return "$EX_FAIL"; fi ;;
+        *)   ENC_ERR="Unsupported recipient key type (RSA and EC certificates are supported): $cert"; return "$EX_FAIL" ;;
+    esac
+    # keyUsage, when present, must permit encrypting a key to this certificate.
+    ku=$(openssl x509 -in "$cert" -noout -ext keyUsage 2>/dev/null | tail -n +2)
+    if [[ -n "$ku" ]]; then
+        if [[ "$type" == "rsa" && "$ku" != *"Key Encipherment"* ]] ||
+           [[ "$type" == "ec"  && "$ku" != *"Key Agreement"* ]]; then
+            ENC_ERR="The certificate's key usage ($(trim "$ku")) does not permit encryption: $cert"; return "$EX_FAIL"
+        fi
+    fi
+    return 0
 }
 
 # Wrap the master key for every recipient with CMS EnvelopedData → base64 line.
@@ -309,20 +377,18 @@ crypto_cert_is_rsa() {
 # The wrapped blob's integrity is covered by the container HMAC.
 _crypto_wrap_master() {
     local master="$1"; shift
-    local -a args=() plain=()
+    local -a args=()
     local cert
     for cert in "$@"; do
-        args+=(-recip "$cert"); plain+=(-recip "$cert")
+        args+=(-recip "$cert")
         if crypto_cert_is_rsa "$cert"; then
             args+=(-keyopt rsa_padding_mode:oaep -keyopt rsa_oaep_md:sha256)
         fi
     done
     local b64
+    # No fallback to PKCS#1 v1.5 key transport: if OAEP is unavailable the
+    # operation fails rather than silently producing a weaker file.
     b64=$(printf '%s' "$master" | openssl cms -encrypt -binary -aes-256-cbc -outform DER "${args[@]}" 2>/dev/null | openssl base64 -A 2>/dev/null)
-    if [[ -z "$b64" ]]; then
-        # Older builds without OAEP key options: fall back to the default key transport.
-        b64=$(printf '%s' "$master" | openssl cms -encrypt -binary -aes-256-cbc -outform DER "${plain[@]}" 2>/dev/null | openssl base64 -A 2>/dev/null)
-    fi
     [[ -n "$b64" ]] || return 1
     printf '%s' "$b64"
 }
@@ -349,8 +415,15 @@ _crypto_unwrap_master() {
 }
 
 # Is a PEM private key passphrase-protected?
+# Structural test, not a text search: the key is "encrypted" only if OpenSSL
+# cannot load it with an empty passphrase AND it carries an encrypted-key
+# header on its first lines (a comment elsewhere in the file cannot fake it).
 crypto_key_is_encrypted() {
-    grep -qE 'BEGIN ENCRYPTED PRIVATE KEY|Proc-Type: 4,ENCRYPTED' "$1" 2>/dev/null
+    local f="$1"
+    [[ -f "$f" && -r "$f" ]] || return 1
+    if openssl pkey -in "$f" -noout -passin pass: </dev/null >/dev/null 2>&1; then return 1; fi
+    local head3; head3=$(head -n 3 -- "$f" 2>/dev/null)
+    grep -qE -e '^-----BEGIN ENCRYPTED PRIVATE KEY-----' -e '^Proc-Type: 4,ENCRYPTED' <<<"$head3"
 }
 
 # --- Container inspection ---------------------------------------------------
@@ -417,7 +490,7 @@ crypto_inspect() {
         password)
             case "${ENC_META[kdf]:-}" in
                 pbkdf2-hmac-sha256)
-                    if [[ ! "${ENC_META[iter]:-}" =~ ^[0-9]{1,9}$ ]] ||
+                    if [[ ! "${ENC_META[iter]:-}" =~ ^[1-9][0-9]{0,8}$ ]] ||
                        (( ENC_META[iter] < ENC_ITER_READ_MIN || ENC_META[iter] > ENC_ITER_MAX )); then
                         ENC_ERR="Invalid KDF iteration count in header."; return "$EX_UNSUPPORTED"
                     fi
@@ -473,17 +546,18 @@ crypto_encrypt() {
         fi
         ENC_RESULT_BYTES_IN=$(get_file_size "$in")
     fi
+    if [[ "$out" != "-" ]]; then
+        if [[ -d "$out" ]]; then ENC_ERR="Output is a directory: $out"; return "$EX_CANTCREAT"; fi
+        if [[ "$in" != "-" ]] && same_file "$in" "$out"; then
+            ENC_ERR="Input and output are the same file: $in"; return "$EX_USAGE"
+        fi
+    fi
 
     local mode master header="" salt wrapped cert fp
     if (( ${#ENC_RECIPIENTS[@]} > 0 )); then
         mode="recipient"
         for cert in "${ENC_RECIPIENTS[@]}"; do
-            if ! openssl x509 -in "$cert" -noout >/dev/null 2>&1; then
-                ENC_ERR="Not a readable X.509 certificate: $cert"; return "$EX_NOINPUT"
-            fi
-            if ! openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1; then
-                ENC_ERR="Recipient certificate has expired: $cert"; return "$EX_FAIL"
-            fi
+            crypto_check_recipient "$cert" || return $?
         done
         _crypto_phase keygen
         master=$(_crypto_rand_hex 32)
@@ -491,7 +565,7 @@ crypto_encrypt() {
             ENC_ERR="Could not obtain random bytes from OpenSSL."; return "$EX_FAIL"
         fi
         wrapped=$(_crypto_wrap_master "$master" "${ENC_RECIPIENTS[@]}") || {
-            ENC_ERR="Could not encrypt the file key for the recipient certificate(s). The certificate must allow key encipherment (RSA) or key agreement (EC)."
+            ENC_ERR="Could not encrypt the file key for the recipient certificate(s) (CMS key wrapping with RSA-OAEP / ECDH failed in this OpenSSL build)."
             return "$EX_FAIL"
         }
         header="${ENC_MAGIC}"$'\n'"mode: recipient"$'\n'"cipher: ${cipher}"$'\n'"mac: hmac-sha256"$'\n'"keywrap: cms"$'\n'
@@ -501,12 +575,7 @@ crypto_encrypt() {
         header+="wrapped: ${wrapped}"$'\n'"---"$'\n'
     else
         mode="password"
-        if [[ -z "$ENC_SECRET" ]]; then
-            ENC_ERR="No password supplied."; return "$EX_USAGE"
-        fi
-        if (( ${#ENC_SECRET} > ENC_PASS_MAX )); then
-            ENC_ERR="Password is too long (limit: ${ENC_PASS_MAX} characters)."; return "$EX_USAGE"
-        fi
+        crypto_check_secret "$ENC_SECRET" "Password" || return "$EX_USAGE"
         local kdf sealed
         case "$kdf_req" in scrypt|pbkdf2|auto) ;; *) ENC_ERR="Unknown KDF '$kdf_req'. Valid: scrypt pbkdf2 auto"; return "$EX_USAGE" ;; esac
         kdf=$(crypto_resolve_kdf "$kdf_req")
@@ -524,9 +593,10 @@ crypto_encrypt() {
             }
             header="${ENC_MAGIC}"$'\n'"mode: password"$'\n'"cipher: ${cipher}"$'\n'"mac: hmac-sha256"$'\n'"kdf: scrypt"$'\n'"sealed: ${sealed}"$'\n'"---"$'\n'
         else
-            if [[ ! "$iter" =~ ^[0-9]{1,9}$ ]] || (( iter < ENC_ITER_MIN || iter > ENC_ITER_MAX )); then
+            if [[ ! "$iter" =~ ^[0-9]{1,9}$ ]] || (( 10#$iter < ENC_ITER_MIN || 10#$iter > ENC_ITER_MAX )); then
                 ENC_ERR="PBKDF2 iteration count must be between ${ENC_ITER_MIN} and ${ENC_ITER_MAX}."; return "$EX_USAGE"
             fi
+            iter=$(( 10#$iter ))
             salt=$(_crypto_rand_hex 8)
             if [[ ! "$salt" =~ ^[0-9a-f]{16}$ ]]; then
                 ENC_ERR="Could not obtain random bytes from OpenSSL."; return "$EX_FAIL"
@@ -605,28 +675,39 @@ crypto_encrypt() {
 #   v3 containers: authenticate first, then decrypt.
 #   legacy files : best effort (see _crypto_decrypt_legacy_*).
 crypto_decrypt() {
-    local in="$1" out="$2" verify_only="${3:-}"
+    local in="$1" out="$2" verify_only="${3:-}" private_input=0
     ENC_ERR=""; ENC_RESULT_BYTES_IN=0; ENC_RESULT_BYTES_OUT=0
     core_tmpdir
 
-    # Authentication needs two passes, so stdin is spooled (ciphertext only).
+    # Standard input is spooled into the private temp dir (ciphertext only).
     if [[ "$in" == "-" ]]; then
-        core_tmpdir
         local spool="$TEMP_DIR/stdin.spool"
         if ! cat > "$spool"; then ENC_ERR="Cannot read standard input."; return "$EX_NOINPUT"; fi
-        in="$spool"
+        in="$spool"; private_input=1
     fi
+    [[ "$in" == "$TEMP_DIR"/* ]] && private_input=1
 
     crypto_inspect "$in" || return $?
     ENC_RESULT_BYTES_IN=${ENC_META[size]}
+    if [[ -z "$verify_only" && "$out" != "-" ]]; then
+        if [[ -d "$out" ]]; then ENC_ERR="Output is a directory: $out"; return "$EX_CANTCREAT"; fi
+        if same_file "$in" "$out"; then ENC_ERR="Input and output are the same file: $in"; return "$EX_USAGE"; fi
+    fi
 
     case "${ENC_META[format]}" in
-        legacy-enc)
-            [[ -n "$verify_only" ]] && { ENC_ERR="Legacy v2 files carry no authentication tag and cannot be verified."; return "$EX_UNSUPPORTED"; }
-            _crypto_decrypt_legacy_enc "$in" "$out"; return $? ;;
-        legacy-smime)
-            [[ -n "$verify_only" ]] && { ENC_ERR="Legacy S/MIME files carry no authentication tag and cannot be verified."; return "$EX_UNSUPPORTED"; }
-            _crypto_decrypt_legacy_smime "$in" "$out"; return $? ;;
+        legacy-enc|legacy-smime)
+            if [[ -n "$verify_only" ]]; then
+                ENC_ERR="Legacy 2.x files carry no authentication tag and cannot be verified."; return "$EX_UNSUPPORTED"
+            fi
+            # Never fall back to an unauthenticated format on the file's say-so:
+            # otherwise replacing a v3 file with a 2.x-style one would silently
+            # bypass authentication. The caller must opt in explicitly.
+            if [[ "$ENC_ALLOW_LEGACY" != "1" ]]; then
+                ENC_ERR="This is a legacy Encryptor 2.x file with NO authentication: its content cannot be verified. Decrypt it only if you trust where it came from, with --legacy."
+                return "$EX_UNSUPPORTED"
+            fi
+            if [[ "${ENC_META[format]}" == "legacy-enc" ]]; then _crypto_decrypt_legacy_enc "$in" "$out"; else _crypto_decrypt_legacy_smime "$in" "$out"; fi
+            return $? ;;
     esac
 
     local cipher="${ENC_META[cipher]}" hdr_len="${ENC_META[hdr_len]}" size="${ENC_META[size]}"
@@ -638,7 +719,7 @@ crypto_decrypt() {
     local master
     if [[ "${ENC_META[mode]}" == "password" ]]; then
         if [[ -z "$ENC_SECRET" ]]; then ENC_ERR="This file is password-protected: a password is required."; return "$EX_USAGE"; fi
-        if (( ${#ENC_SECRET} > ENC_PASS_MAX )); then ENC_ERR="Password is too long."; return "$EX_USAGE"; fi
+        crypto_check_secret "$ENC_SECRET" "Password" || return "$EX_USAGE"
         if [[ "${ENC_META[kdf]}" == "scrypt" ]]; then
             if ! crypto_scrypt_available; then
                 ENC_ERR="This file uses scrypt, which this OpenSSL build does not support."; return "$EX_UNSUPPORTED"
@@ -658,6 +739,7 @@ crypto_decrypt() {
         if [[ -z "$ENC_KEY_FILE" ]]; then ENC_ERR="This file is encrypted for certificate recipients: a private key (--key) is required."; return "$EX_USAGE"; fi
         if [[ ! -f "$ENC_KEY_FILE" || ! -r "$ENC_KEY_FILE" ]]; then ENC_ERR="Private key not found or not readable: $ENC_KEY_FILE"; return "$EX_NOINPUT"; fi
         if [[ -n "$ENC_CERT_FILE" && ! -f "$ENC_CERT_FILE" ]]; then ENC_ERR="Certificate not found: $ENC_CERT_FILE"; return "$EX_NOINPUT"; fi
+        if [[ -n "$ENC_KEY_SECRET" ]]; then crypto_check_secret "$ENC_KEY_SECRET" "Key passphrase" || return "$EX_USAGE"; fi
         _crypto_phase unwrap
         master=$(_crypto_unwrap_master "${ENC_META[wrapped]}" "$ENC_KEY_FILE" "$ENC_CERT_FILE" "$ENC_KEY_SECRET") || {
             ENC_ERR="Could not unwrap the file key: this private key is not a recipient of the file, or its passphrase is wrong."
@@ -672,53 +754,84 @@ crypto_decrypt() {
     }
     master=""
 
-    # 1. Authenticate header + ciphertext before producing any plaintext.
-    _crypto_phase verify "$auth_len"
-    local tag_stored tag_calc
-    tag_stored=$(tail -c "$ENC_TAG_LEN" -- "$in" | tr -d '\000')
-    tag_calc=$(head -c "$auth_len" -- "$in" | _crypto_hmac "$mac_key")
-    mac_key=""
-    if [[ ! "$tag_calc" =~ ^[0-9a-f]{64}$ ]]; then
-        ENC_ERR="Could not compute the authentication tag."; return "$EX_FAIL"
-    fi
-    if [[ "$tag_stored" != "$tag_calc" ]]; then
-        if [[ "${ENC_META[mode]}" == "password" ]]; then
-            ENC_ERR="Authentication failed: wrong password, or the file has been modified or corrupted."
-        else
-            ENC_ERR="Authentication failed: the file has been modified or corrupted."
-        fi
-        return "$EX_AUTH"
-    fi
-    if [[ -n "$verify_only" ]]; then enc_key=""; return 0; fi
-
-    # 2. Decrypt the (now authenticated) body.
-    core_tmpdir
-    local errf="$TEMP_DIR/dec.err" rc
+    local auth_fail="Authentication failed: the file has been modified or corrupted."
+    [[ "${ENC_META[mode]}" == "password" ]] && auth_fail="Authentication failed: wrong password, or the file has been modified or corrupted."
+    local errf="$TEMP_DIR/dec.err" tag_stored tag_calc rc
     local -a st
-    if [[ "$out" == "-" ]]; then
+
+    # --- Verify only, or output to a pipe -----------------------------------
+    # Plaintext sent to stdout cannot be taken back, so the tag must be
+    # checked first. To make the bytes that are verified and the bytes that
+    # are decrypted provably the same, the two passes run over a copy in the
+    # private temp dir (ciphertext only) that nobody else can modify.
+    if [[ -n "$verify_only" || "$out" == "-" ]]; then
+        if [[ -z "$verify_only" && $private_input -eq 0 ]]; then
+            _crypto_phase verify
+            local copy="$TEMP_DIR/input.copy"
+            if ! head -c "$size" -- "$in" > "$copy"; then
+                rm -f -- "$copy"; ENC_ERR="Not enough temporary space to stage the input (set TMPDIR, or decrypt to a file instead of '-')."; return "$EX_FAIL"
+            fi
+            in="$copy"
+            if [[ "$(get_file_size "$in")" != "$size" ]]; then rm -f -- "$copy"; ENC_ERR="$auth_fail"; return "$EX_AUTH"; fi
+        fi
+        _crypto_phase verify
+        tag_calc=$(head -c "$auth_len" -- "$in" | _crypto_hmac "$mac_key")
+        tag_stored=$(tail -c "$ENC_TAG_LEN" -- "$in" | tr -d '\000')
+        mac_key=""
+        if [[ ! "$tag_calc" =~ ^[0-9a-f]{64}$ ]]; then enc_key=""; ENC_ERR="Could not compute the authentication tag."; return "$EX_FAIL"; fi
+        if [[ "$tag_stored" != "$tag_calc" ]]; then enc_key=""; ENC_ERR="$auth_fail"; return "$EX_AUTH"; fi
+        if [[ -n "$verify_only" ]]; then enc_key=""; return 0; fi
+
         _crypto_phase decrypt "" 0
         head -c "$auth_len" -- "$in" | tail -c "+$(( hdr_len + 1 ))" \
             | openssl enc -d "-$cipher" -pbkdf2 -iter "$ENC_BODY_ITER" -md sha256 \
                 -pass fd:3 3< <(printf '%s\n' "$enc_key") 2>"$errf"
         st=("${PIPESTATUS[@]}"); rc=${st[2]}
         enc_key=""
+        rm -f -- "$TEMP_DIR/input.copy"
         if (( rc != 0 )); then ENC_ERR="OpenSSL decryption failed: $(head -n 2 "$errf" | tr '\n' ' ')"; rm -f "$errf"; return "$EX_FAIL"; fi
         rm -f "$errf"
         return 0
     fi
 
-    local part; part=$(crypto_part_path "$out")
+    # --- Output to a file: one pass ------------------------------------------
+    # The input is read exactly once. The same byte stream feeds the HMAC and,
+    # through a FIFO, the decryption, which writes to a private in-progress
+    # file. That file is renamed to the requested output only if the tag over
+    # the bytes that were actually decrypted is correct; otherwise it is
+    # deleted. A file modified while we work can therefore never yield output.
+    local part fifo="$TEMP_DIR/dec.fifo" dec_pid dec_rc
+    part=$(crypto_part_path "$out")
     if ! _crypto_part_create "$part"; then
         ENC_ERR="Cannot write output: $out"; return "$EX_CANTCREAT"
     fi
+    rm -f -- "$fifo"
+    if ! mkfifo -m 600 "$fifo" 2>/dev/null; then
+        rm -f -- "$part"; core_cleanup_forget "$part"
+        ENC_ERR="Cannot create a FIFO in the temporary directory."; return "$EX_FAIL"
+    fi
     _crypto_phase decrypt "$part" "${ENC_META[body_len]}"
-    head -c "$auth_len" -- "$in" | tail -c "+$(( hdr_len + 1 ))" \
-        | openssl enc -d "-$cipher" -pbkdf2 -iter "$ENC_BODY_ITER" -md sha256 \
-            -pass fd:3 3< <(printf '%s\n' "$enc_key") > "$part" 2>"$errf"
-    st=("${PIPESTATUS[@]}"); rc=${st[2]}
-    enc_key=""
-    if (( rc != 0 )); then
-        ENC_ERR="OpenSSL decryption failed: $(head -n 2 "$errf" | tr '\n' ' ')"
+    (
+        tail -c "+$(( hdr_len + 1 ))" < "$fifo" \
+            | openssl enc -d "-$cipher" -pbkdf2 -iter "$ENC_BODY_ITER" -md sha256 \
+                -pass fd:3 3< <(printf '%s\n' "$enc_key") > "$part" 2>"$errf"
+        exit "${PIPESTATUS[1]}"
+    ) &
+    dec_pid=$!
+    # SIGPIPE is ignored for tee so that a failing decryption (e.g. disk full)
+    # cannot cut the HMAC input short and be misreported as tampering.
+    tag_calc=$(head -c "$auth_len" -- "$in" | { trap '' PIPE; tee -- "$fifo" 2>/dev/null; } | _crypto_hmac "$mac_key")
+    wait "$dec_pid"; dec_rc=$?
+    rm -f -- "$fifo"
+    enc_key=""; mac_key=""
+    tag_stored=$(tail -c "$ENC_TAG_LEN" -- "$in" | tr -d '\000')
+
+    if [[ ! "$tag_calc" =~ ^[0-9a-f]{64}$ || "$tag_stored" != "$tag_calc" ]]; then
+        rm -f -- "$part" "$errf"; core_cleanup_forget "$part"
+        ENC_ERR="$auth_fail"; return "$EX_AUTH"
+    fi
+    if (( dec_rc != 0 )); then
+        ENC_ERR="Decryption failed after successful authentication: $(head -n 2 "$errf" 2>/dev/null | tr '\n' ' ')(is the disk full?)"
         rm -f -- "$part" "$errf"; core_cleanup_forget "$part"
         return "$EX_FAIL"
     fi
@@ -745,16 +858,17 @@ _crypto_decrypt_legacy_enc() {
     if ! crypto_is_cipher "$algo"; then
         ENC_ERR="Unknown legacy algorithm '$algo'. Valid: ${ENC_CIPHER_IDS[*]}"; return "$EX_USAGE"
     fi
-    if [[ ! "$iter" =~ ^[0-9]{1,9}$ ]] || (( iter < 1 || iter > ENC_ITER_MAX )); then
+    if [[ ! "$iter" =~ ^[0-9]{1,9}$ ]] || (( 10#$iter < 1 || 10#$iter > ENC_ITER_MAX )); then
         ENC_ERR="Invalid iteration count."; return "$EX_USAGE"
     fi
-    if [[ -z "$ENC_SECRET" ]]; then ENC_ERR="A password is required."; return "$EX_USAGE"; fi
-    if (( ${#ENC_SECRET} > ENC_PASS_MAX )); then ENC_ERR="Password is too long."; return "$EX_USAGE"; fi
+    iter=$(( 10#$iter ))
+    crypto_check_secret "$ENC_SECRET" "Password" || return "$EX_USAGE"
 
     local sidecar="${in}.sha256"
     if [[ -f "$sidecar" ]]; then
         local want have
-        want=$(awk 'NR==1{print tolower($1)}' "$sidecar" 2>/dev/null)
+        IFS=$' \t' read -r want _ < "$sidecar" || true
+        want=${want,,}
         have=$(sha256_file "$in")
         if [[ -n "$want" && "$want" != "$have" ]]; then
             ENC_ERR="Checksum mismatch against ${sidecar}: the file is corrupted or was modified."
@@ -796,6 +910,7 @@ _crypto_decrypt_legacy_smime() {
     if [[ -z "$ENC_KEY_FILE" || ! -f "$ENC_KEY_FILE" ]]; then
         ENC_ERR="A private key (--key) is required to decrypt this S/MIME file."; return "$EX_USAGE"
     fi
+    if [[ -n "$ENC_KEY_SECRET" ]]; then crypto_check_secret "$ENC_KEY_SECRET" "Key passphrase" || return "$EX_USAGE"; fi
     local -a args=(-decrypt -in "$in" -inform PEM -inkey "$ENC_KEY_FILE")
     [[ -n "$ENC_CERT_FILE" ]] && args+=(-recip "$ENC_CERT_FILE")
     core_tmpdir
@@ -927,9 +1042,12 @@ crypto_selftest() {
         (( rc == 0 )) && { cmp -s "$d/plain" "$d/back2" || rc=1; }
     fi
     if (( rc == 0 )); then
-        # Flip one ciphertext byte: authentication must fail.
-        local size; size=$(get_file_size "$d/enc")
-        { head -c $(( size - 70 )) "$d/enc"; printf 'X'; tail -c 69 "$d/enc"; } > "$d/bad"
+        # Change one ciphertext byte (to a value guaranteed to differ):
+        # authentication must fail.
+        local size old new="X"; size=$(get_file_size "$d/enc")
+        old=$(head -c $(( size - 69 )) "$d/enc" | tail -c 1 | od -An -v -tx1 | tr -d ' \n')
+        [[ "$old" == "58" ]] && new="Y"
+        { head -c $(( size - 70 )) "$d/enc"; printf '%s' "$new"; tail -c 69 "$d/enc"; } > "$d/bad"
         if crypto_decrypt "$d/bad" "$d/bad.out" 2>/dev/null; then rc=1; fi
         [[ -e "$d/bad.out" ]] && rc=1
     fi

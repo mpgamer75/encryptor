@@ -136,7 +136,7 @@ ui_fit_left() {
 }
 
 # Shorten $HOME to ~ for display.
-ui_path() { local p="$1"; [[ -n "${HOME:-}" && "$p" == "$HOME"* ]] && p="~${p#"$HOME"}"; printf '%s' "$p"; }
+ui_path() { local p="$1"; [[ -n "${HOME:-}" && "$p" == "$HOME"* ]] && p="~${p#"$HOME"}"; ui_safe "$p"; }
 
 # Path for display: ~ for $HOME, truncated from the left to fit panels.
 ui_pathfit() {
@@ -267,8 +267,8 @@ ui_prompt_path() {
     # Expand a leading ~ (no other expansion is performed on user input).
     # shellcheck disable=SC2088  # deliberate: matching a literal leading tilde
     case "$ans" in
-        "~")    ans="$HOME" ;;
-        "~/"*)  ans="$HOME/${ans:2}" ;;
+        "~")    ans="${HOME:-$ans}" ;;
+        "~/"*)  [[ -n "${HOME:-}" ]] && ans="$HOME/${ans:2}" ;;
     esac
     UI_REPLY="$ans"
 }
@@ -277,7 +277,9 @@ ui_prompt_path() {
 ui_prompt_secret() {
     local label="$1" ans=""
     printf '  %s%s%s: ' "$BOLD" "$label" "$RESET"
-    if (( UI_TTY )); then
+    # Echo is suppressed whenever the secret is typed on a terminal, even if
+    # our output is piped elsewhere (line mode).
+    if [[ -t 0 ]]; then
         IFS= read -rs ans || { echo; UI_REPLY=""; return 1; }
         echo
     else
@@ -400,7 +402,7 @@ _ui_sel_lines() {
         # Also accept an item's key or its exact label (e.g. a file name).
         for (( i = 0; i < ${#UI_SEL_KINDS[@]}; i++ )); do
             if [[ "${UI_SEL_KINDS[$i]}" == item && -n "$ans" ]] &&
-               [[ "${UI_SEL_KEYS[$i]}" == "$ans" || "${UI_SEL_LABELS[$i]}" == "$ans" ]]; then
+               [[ "${UI_SEL_KEYS[$i]}" == "$ans" || "${UI_SEL_LABELS[$i]}" == "$ans" || "${UI_SEL_KEYS[$i]}" == "f:$ans" ]]; then
                 UI_CHOICE="${UI_SEL_KEYS[$i]}"; return 0
             fi
         done
@@ -584,7 +586,7 @@ ui_pick_file() {
         ui_sel_add "@path" "Type a path${G_ELLIPSIS}" "TAB completion"
         ui_sel_add "@up" "../" "parent directory"
         local i
-        for entry in "${dirs[@]:-}"; do [[ -n "$entry" ]] && ui_sel_add "d:$entry" "$entry/" "directory"; done
+        for entry in "${dirs[@]:-}"; do [[ -n "$entry" ]] && ui_sel_add "d:$entry" "$(ui_safe "$entry")/" "directory"; done
         i=0
         for entry in "${files[@]:-}"; do
             [[ -n "$entry" ]] || continue
@@ -595,7 +597,7 @@ ui_pick_file() {
                 *.pem|*.crt|*.cer) hint+="  ${G_DOT} certificate" ;;
                 *.key)             hint+="  ${G_DOT} private key" ;;
             esac
-            ui_sel_add "f:$entry" "$entry" "$hint"
+            ui_sel_add "f:$entry" "$(ui_safe "$entry")" "$hint"
             (( i++ ))
         done
 
@@ -614,7 +616,7 @@ ui_pick_file() {
                 [[ -z "$UI_REPLY" ]] && continue
                 if [[ -d "$UI_REPLY" ]]; then dir="$UI_REPLY"; continue; fi
                 if [[ -f "$UI_REPLY" ]]; then UI_CHOICE="$UI_REPLY"; return 0; fi
-                ui_err "No such file: $UI_REPLY"; ui_pause ;;
+                ui_err "No such file: $(ui_safe "$UI_REPLY")"; ui_pause ;;
             @up)   dir="$dir/.." ;;
             d:*)   dir="$dir/${UI_CHOICE:2}" ;;
             f:*)

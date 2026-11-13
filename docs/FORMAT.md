@@ -63,8 +63,9 @@ a pipe, and because its encoding has no optional fields, so every OpenSSL
 version produces and parses the same 48 bytes.
 
 The scrypt parameters and salt live inside the structure. Before doing any
-work a reader extracts them (`openssl asn1parse`) and rejects anything outside
-`2 ≤ N ≤ 2^20`, `1 ≤ r ≤ 32`, `1 ≤ p ≤ 64`, or a cipher other than
+work a reader extracts them (`openssl asn1parse`) and rejects: N that is not a
+power of two; `N·r > 262144` (more than 32 MiB of memory); `N·r·p > 4194304`
+(more than about six times the default work); or a cipher other than
 AES-256-CBC.
 
 ### Password mode — PBKDF2 (`--kdf pbkdf2`)
@@ -94,8 +95,10 @@ wrapped: <base64, single line>
 
 `wrapped` is a DER-encoded CMS EnvelopedData structure whose content is the
 64-character hex master key, with one RecipientInfo per certificate: RSA keys
-use RSA-OAEP with SHA-256, EC keys use ECDH key agreement. `recipient-fp`
-lines are informational (they let `inspect` show who can open the file).
+use RSA-OAEP with SHA-256 (there is no fallback to PKCS#1 v1.5), EC keys use
+ECDH key agreement. `recipient-fp` lines are informational: they let `inspect`
+show who can open the file, are not compared with the CMS structure, and are
+trustworthy only once the file has been verified.
 
 ## Key schedule
 
@@ -138,13 +141,23 @@ characters.
 
 ## Decryption procedure
 
-1. Parse and validate the header (strict grammar and allow-lists).
+1. Parse and validate the header (strict grammar, allow-lists, cost bounds).
+   `iter` must be a decimal number without leading zeros, between 1000 and
+   10,000,000.
 2. Obtain `master` (open `sealed` with the password, or run PBKDF2, or
    CMS-decrypt `wrapped` with the private key).
 3. Derive `body_key` and `mac_key`.
-4. Compute the tag over `file[0 .. size-64)` and compare it with the stored
-   tag. **Stop on mismatch** — nothing is written.
-5. Decrypt `file[header_length .. size-64)` with `openssl enc -d`.
+4. Read `file[0 .. size-64)` **once**. Feed every byte to the HMAC, and the
+   bytes from `header_length` onwards to `openssl enc -d`, whose output goes to
+   a private in-progress file.
+5. Compare the computed tag with the last 64 bytes of the file. If they are
+   equal, rename the in-progress file to the requested output; otherwise
+   delete it. **Nothing is ever released for a file that does not verify**,
+   including one that is modified while it is being read.
+
+When the output is a pipe (where bytes cannot be taken back), the reference
+implementation instead copies the ciphertext to a private location, verifies
+the tag there, and only then decrypts from that copy.
 
 A wrong password either fails to open `sealed` (step 2) or yields a different
 `master`, hence a different `mac_key`, so step 4 fails: "wrong password" and
@@ -162,9 +175,9 @@ makes step 2 or step 4 fail.
 - Encrypt-then-MAC with independent keys is a standard, provably sound
   composition. With the AES ciphers every primitive is NIST-approved.
 - The file length and the recipients' certificate fingerprints are visible.
-- The tag is checked once, over the whole file: decryption needs two passes
-  and input from a pipe is spooled to a private temporary file (ciphertext
-  only). This is not a chunked streaming AEAD.
+- The tag is checked once, over the whole file; this is not a chunked
+  streaming AEAD. Input from a pipe, and any input whose output is a pipe, is
+  staged in a private temporary directory (ciphertext only).
 - scrypt at N=2^14, r=8, p=5 costs 16 MiB of memory per password guess. That
   is the largest N the OpenSSL command line accepts for PKCS#8 (it caps scrypt
   memory at 32 MiB); p=5 supplies the rest of the work, and the combination is
@@ -197,7 +210,7 @@ size=$(wc -c < "$f" | tr -d ' ')
 
 # master key — "kdf: scrypt" files (the default)
 master=$(sed -n '/^---$/q; s/^sealed: //p' "$f" | openssl base64 -d -A \
-         | openssl pkcs8 -inform DER -topk8 -nocrypt -outform DER -passin "pass:$PW" \
+         | openssl pkcs8 -inform DER -outform DER -passin "pass:$PW" \
          | tail -c 32 | od -An -v -tx1 | tr -d ' \n')
 
 # master key — "kdf: pbkdf2-hmac-sha256" files: use this line instead
@@ -227,6 +240,10 @@ Both password variants of this recipe are executed by the test suite
 (`tests/run.sh`), so they cannot silently go stale.
 
 ## Legacy formats (read-only)
+
+Legacy files are never opened implicitly: `--legacy` must be given. Otherwise
+replacing an authenticated file with 2.x-style data would bypass
+authentication without any error.
 
 | Written by | Format | Detection | Notes |
 |---|---|---|---|

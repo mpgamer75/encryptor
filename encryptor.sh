@@ -75,13 +75,16 @@ unset _enc_mod
 core_install_traps
 
 # --- Dispatch ----------------------------------------------------------------
-# --no-color may appear anywhere on the command line.
-_enc_args=()
+# --no-color may appear anywhere among the options (never after "--", where
+# everything is a file name).
+_enc_args=(); _enc_opts=1
 for _enc_a in "$@"; do
-    if [[ "$_enc_a" == "--no-color" ]]; then export NO_COLOR=1; else _enc_args+=("$_enc_a"); fi
+    if (( _enc_opts )) && [[ "$_enc_a" == "--no-color" ]]; then export NO_COLOR=1; continue; fi
+    [[ "$_enc_a" == "--" ]] && _enc_opts=0
+    _enc_args+=("$_enc_a")
 done
 set -- "${_enc_args[@]+"${_enc_args[@]}"}"
-unset _enc_args _enc_a
+unset _enc_args _enc_a _enc_opts
 
 ui_init
 
