@@ -272,7 +272,12 @@ check      "2.0 file (aes-256-ctr, 100k) decrypts with --legacy" bash -c "bash '
 check      "legacy warning is printed even with --quiet"   bash -c "bash '$ENC' decrypt --legacy -q -f -p pass -o v21.out v21.enc 2>&1 | grep -q 'NOT authenticated'"
 check      "legacy JSON result says verified:false"        bash -c "bash '$ENC' decrypt --legacy -f --json -p pass -o v21.out v21.enc 2>/dev/null | grep -q '\"verified\":false'"
 check      "v3 JSON result says verified:true"             bash -c "bash '$ENC' decrypt -f --json -p pass -o auth.jout auth.enc | grep -q '\"verified\":true'"
-check_rc 3 "2.1 file with wrong password fails"    enc decrypt --legacy -p badpass -o v21w.out v21.enc
+# A 2.x file has no authentication: a wrong password is caught only by the CBC
+# padding check, which lets about 1 key in 256 through (producing garbage).
+# What is guaranteed is that the plaintext is never recovered.
+rc=0; enc decrypt --legacy -p badpass -o v21w.out v21.enc >/dev/null 2>&1 || rc=$?
+if [[ $rc -eq 3 && ! -e v21w.out ]] || { [[ $rc -eq 0 ]] && ! cmp -s plain.txt v21w.out; }; then ok "2.1 file with wrong password never yields the plaintext"
+else bad "2.1 file with wrong password never yields the plaintext" "exit $rc"; fi
 check      "inspect flags legacy as unauthenticated" bash -c "bash '$ENC' inspect v21.enc | grep -q 'NOT authenticated'"
 check_rc 6 "verify refuses legacy files"           enc verify -p pass v21.enc
 printf '%s  v21.enc\n' "0000000000000000000000000000000000000000000000000000000000000000" > v21.enc.sha256
